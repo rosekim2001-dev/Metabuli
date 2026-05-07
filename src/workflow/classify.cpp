@@ -7,13 +7,11 @@
 #include "fastq_info.cpp"
 #include "validateDatabase.h"
 
-
-void setClassifyDefaults(LocalParameters & par){
+void setClassifyDefaults(LocalParameters & par){    
     par.maxEValue = 1;
     par.syncmer = 0;
     par.smerLen = 5;
     par.kmerFormat = 1;
-
     par.maxShift = 1;
     par.skipRedundancy = 0;
     par.validateInput = 0;
@@ -35,6 +33,7 @@ void setClassifyDefaults(LocalParameters & par){
     par.minAaMatch = 11;
     par.minAaMatchEuk = 16;
     par.priorityTaxa = "";
+    par.minAvgScore = 0;
     // unexposed experimental parameters
     par.spaceMask = "";
     par.useAllMatches = 0;
@@ -200,11 +199,9 @@ int classify(int argc, const char **argv, const Command& command) {
 #endif
 
     Classifier * classifier = new Classifier(par);
-    // classifier->startClassify(par);
-    if (par.storeKmerPos) {
-        classifier->classifyReadsWithPos();
+    if (par.em) {
+        classifier->startClassify(par);
     } else {
-        cout << "Classifying reads ..." << endl;
         classifier->classifyReads();
     }
     delete classifier;

@@ -256,6 +256,34 @@ LocalParameters::LocalParameters() :
                  typeid(std::string),
                  (void *) &priorityTaxa,
                  "^.*$"),
+        MIN_AVG_SCORE(MIN_AVG_SCORE_ID,
+                "--min-avg-score",
+                "Min. average score for classification",
+                "Min. average score for classification (0.0-1.0)",
+                typeid(float),
+                (void *) &minAvgScore,
+                "^0(\\.[0-9]+)?|1(\\.0+)?$"),
+        MIN_CLADE_COUNT(MIN_CLADE_COUNT_ID,
+                "--min-clade-count",
+                "Min. read count for a clade",
+                "Min. read count for a clade",
+                typeid(int),
+                (void *) &minCladeCount,
+                "^[0-9]+$"),
+        MIN_CLADE_PROPORTION(MIN_CLADE_PROPORTION_ID,
+                "--min-clade-proportion",
+                "Min. read proportion for a clade (0.0-1.0)",
+                "Min. read proportion for a clade (0.0-1.0)",
+                typeid(float),
+                (void *) &minCladeProportion,
+                "^0(\\.[0-9]+)?|1(\\.0+)?$"),
+        PRINT_FILTERED_RESULTS(PRINT_FILTERED_RESULTS_ID,
+                "--filtered-results",
+                "Print filtered classification results",
+                "Print filtered classification results",
+                typeid(std::string),
+                (void *) &outFilteredResults,
+                "^.*$"),
         TARGET_TAX_ID(TARGET_TAX_ID_ID,
                "--tax-id",
                "Tax. ID of clade. -1 for unclassified reads",
@@ -396,20 +424,6 @@ LocalParameters::LocalParameters() :
                 typeid(int),
                 (void *) &readingFrame,
                 "^[0-6]$"),
-        STORE_KMER_POS(STORE_KMER_POS_ID,
-                "--kmer-pos",
-                "Store k-mer positions in the index",
-                "Store k-mer positions in the index",
-                typeid(int),
-                (void *) &storeKmerPos,
-                "[0-1]"),
-        REP_GENOME_LIST(REP_GENOME_LIST_ID,
-                "--rep-genomes",
-                "Species representative genomes.",
-                "Species representative genomes.",
-                typeid(std::string),
-                (void *) &repGenomeList,
-                "^.*$"),
         NO_MASK_TAXA(NO_MASK_TAXA_ID,
                 "--no-mask-taxa",
                 "Comma-separated tax IDs to not mask low-complexity regions",
@@ -665,8 +679,6 @@ LocalParameters::LocalParameters() :
     build.push_back(&PARAM_CUSTOM_METAMER);
     build.push_back(&SPACE_MASK);
     build.push_back(&READING_FRAME);
-    build.push_back(&STORE_KMER_POS);
-    build.push_back(&REP_GENOME_LIST);
     build.push_back(&NO_MASK_TAXA);
 
     createCommonKmerList.push_back(&PARAM_THREADS);
@@ -694,6 +706,7 @@ LocalParameters::LocalParameters() :
     updateDB.push_back(&GTDB);
     updateDB.push_back(&VALIDATE_INPUT);
     updateDB.push_back(&VALIDATE_DB);
+    // updateDB.push_back(&SYNCMER);
     updateDB.push_back(&NO_MASK_TAXA);
 
     //classify
@@ -720,16 +733,13 @@ LocalParameters::LocalParameters() :
     classify.push_back(&PARAM_SUB_MAT);
     // classify.push_back(&KMER_FORMAT);
     classify.push_back(&PRINT_LOG);
-    classify.push_back(&PDM_KMER);
-    classify.push_back(&SCORE_MODE);
-    classify.push_back(&MAX_E_VALUE);
     classify.push_back(&TIE_BRAKER);
     // classify.push_back(&PDM_KMER);
     // classify.push_back(&SCORE_MODE);
     
     classify.push_back(&DB_TOTAL_LENGTH);
     classify.push_back(&MAX_SHIFT);
-    // classify.push_back(&EM);
+    classify.push_back(&EM);
 
     assignUniref.push_back(&PARAM_THREADS);
     assignUniref.push_back(&RAM_USAGE);
@@ -837,6 +847,14 @@ LocalParameters::LocalParameters() :
     classifiedRefiner.push_back(&PRINT_LINEAGE);
     classifiedRefiner.push_back(&TAXONOMY_PATH);
 
+    refineReport.push_back(&MIN_AVG_SCORE);
+    refineReport.push_back(&MIN_CLADE_COUNT);
+    refineReport.push_back(&MIN_CLADE_PROPORTION);
+    refineReport.push_back(&PRINT_FILTERED_RESULTS);
+    refineReport.push_back(&EXCLUDE_TAXID);
+    refineReport.push_back(&MIN_SCORE);
+    refineReport.push_back(&MAX_E_VALUE);
+
     makeBenchmarkSet.push_back(&RANDOM_SEED);
     makeBenchmarkSet.push_back(&ASSACC2TAXID);
     makeBenchmarkSet.push_back(&TEST_TYPE);
@@ -844,6 +862,8 @@ LocalParameters::LocalParameters() :
     mergeAssemblyFiles.push_back(&DB_NAME);
 
     createTaxDb.push_back(&GTDB);
+
+    accession2taxid.push_back(&GTDB);
 }
 
 void LocalParameters::printParameters(const std::string &module, int argc, const char* pargv[],
