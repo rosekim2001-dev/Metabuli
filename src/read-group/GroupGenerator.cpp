@@ -4,6 +4,20 @@
 #include "common.h"
 #include "Kmer.h"
 
+#ifdef OPENMP
+#include <omp.h>
+#endif
+
+namespace {
+inline size_t getThreadIdSafe() {
+#ifdef OPENMP
+    return static_cast<size_t>(omp_get_thread_num());
+#else
+    return 0;
+#endif
+}
+}
+
 GroupGenerator::GroupGenerator(LocalParameters & par) : par(par) {
     commonKmerDB = par.filenames[1 + (par.seqMode == 2)];
     taxDbDir     = par.filenames[2 + (par.seqMode == 2)];
@@ -540,7 +554,7 @@ void GroupGenerator::makeGraph(
 
     #pragma omp parallel num_threads(par.threads)
     {
-        int threadIdx = omp_get_thread_num();
+        int threadIdx = static_cast<int>(getThreadIdSafe());
         std::unordered_map<uint64_t, uint16_t> pair2weight;
         pair2weight.reserve(RELATION_THRESHOLD);
         std::vector<DeltaIdxReader*> deltaIdxReaders;
@@ -1216,7 +1230,7 @@ void GroupGenerator::writeKmers(
     std::vector<std::pair<size_t, size_t>> queryKmerRanges = getKmerRanges(queryKmerBuffer, blankCnt);
     #pragma omp parallel default(none), shared(queryKmerBuffer, queryKmerRanges, processedReadCnt)
     {
-        size_t threadId = omp_get_thread_num();
+        size_t threadId = getThreadIdSafe();
         size_t startIdx = queryKmerRanges[threadId].first;
         size_t endIdx = queryKmerRanges[threadId].second;
         WriteBuffer<uint16_t> diffBuffer(this->outDir + "/kmer_delta_" + to_string(this->numOfSplits) + "_" + to_string(threadId), 1024 * 1024);

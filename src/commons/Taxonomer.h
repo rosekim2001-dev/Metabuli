@@ -28,7 +28,6 @@ struct TaxonScore {
     TaxonScore() : taxId(0), score(), hammingDist(0), LCA(false) {}
 };
 
-template <typename MatchType>
 class Taxonomer {
 private:
     const LocalParameters & par;
@@ -64,19 +63,19 @@ private:
     unordered_map<TaxID, unsigned int> taxCnt;
 
     // getBestSpeciesMatches
-    vector<MatchPath<MatchType>> matchPaths;
-    vector<MatchPath<MatchType>> combinedMatchPaths;
+    vector<MatchPath<Match>> matchPaths;
+    vector<MatchPath<Match>> combinedMatchPaths;
     vector<TaxID> maxSpecies;
 
     // getMatchPaths
     vector<bool> connectedToNext;
-    vector<MatchPath<MatchType>> localMatchPaths;
+    vector<MatchPath<Match>> localMatchPaths;
 
     // lowerRankClassification
     unordered_map<TaxID, TaxonCounts> cladeCnt;
 
     // filterRedundantMatches
-    const MatchType **bestMatchForQuotient;
+    const Match **bestMatchForQuotient;
     TaxID *bestMatchTaxIdForQuotient;
     uint8_t *minHammingForQuotient;
     size_t arraySize_filterRedundantMatches;
@@ -88,20 +87,20 @@ private:
     void ensureArraySize(size_t newSize);
 
     void printSpeciesMatches (
-       const MatchType *matchList,
+       const Match *matchList,
        const std::pair<size_t, size_t> & bestSpeciesRange
     );
 
     
     TaxonScore getBestSpeciesMatches(
         std::pair<size_t, size_t> & bestSpeciesRange,
-        const MatchType *matchList,
+        const Match *matchList,
         size_t end,
         size_t offset,
         Query & query);
 
-    MatchPath<MatchType> makeMatchPath(
-        const MatchType * match
+    MatchPath<Match> makeMatchPath(
+        const Match * match
     );
 
     // void makeMatchPath(
@@ -112,46 +111,47 @@ private:
     //     TaxID speciesId);
 
     void getMatchPaths_lookbackDP(
-        const MatchType * matchList,
+        const Match * matchList,
         size_t matchNum,
-        vector<MatchPath<MatchType>> & matchPaths,
+        vector<MatchPath<Match>> & matchPaths,
         TaxID speciesId);
 
     void getSpacedMatchPaths_lookbackDP(
-        const MatchType * matchList,
+        const Match * matchList,
         size_t matchNum,
-        vector<MatchPath<MatchType>> & matchPaths,
+        vector<MatchPath<Match>> & matchPaths,
         TaxID speciesId);
 
     void getMatchPaths(
-        const MatchType * matchList,
+        const Match * matchList,
         size_t matchNum,
-        vector<MatchPath<MatchType>> & matchPaths,
+        vector<MatchPath<Match>> & matchPaths,
         TaxID speciesId);
     
     void getSpacedMatchPaths(
-        const MatchType * matchList,
+        const Match * matchList,
         size_t matchNum,
-        vector<MatchPath<MatchType>> & matchPaths,
+        vector<MatchPath<Match>> & matchPaths,
         TaxID speciesId); 
 
     void makeSpacedMatchPath(
-        const MatchType * match,
+        const Match * match,
         size_t index
     );
 
     MatchScore combineMatchPaths(
-        vector<MatchPath<MatchType>> & matchPaths,
+        vector<MatchPath<Match>> & matchPaths,
         size_t matchPathStart,
-        vector<MatchPath<MatchType>> & combMatchPaths,
+        vector<MatchPath<Match>> & combMatchPaths,
         size_t combMatchPathStart,
         int queryLength);
         
-    bool isMatchPathOverlapped(const MatchPath<MatchType> & matchPath1, const MatchPath<MatchType> & matchPath2);
+    bool isMatchPathOverlapped(const MatchPath<Match> & matchPath1, const MatchPath<Match> & matchPath2);
 
-    bool trimMatchPath(MatchPath<MatchType> & path1, const MatchPath<MatchType> & path2, int overlapLength);
-    bool trimSpacedMatchPath(MatchPath<MatchType> & path1, const MatchPath<MatchType> & path2, int overlapLength);
-    void sortMatchPath(std::vector<MatchPath<MatchType>> & matchPaths, size_t i);
+    bool trimMatchPath2(MatchPath<Match> & path1, const MatchPath<Match> & path2, int overlapLength);
+    void trimMatchPath(MatchPath<Match> & path1, const MatchPath<Match> & path2, int overlapLength);
+    bool trimSpacedMatchPath(MatchPath<Match> & path1, const MatchPath<Match> & path2, int overlapLength);
+    void sortMatchPath(std::vector<MatchPath<Match>> & matchPaths, size_t i);
 
    
 public:
@@ -170,10 +170,11 @@ public:
     void chooseBestTaxon(uint32_t currentQuery,
                          size_t offset,
                          size_t end,
-                         const MatchType *matchList,
-                         vector<Query> & queryList);      
+                         const Match *matchList,
+                         vector<Query> & queryList,
+                         const LocalParameters &par);      
 
-    void filterRedundantMatches(const MatchType *matchList,
+    void filterRedundantMatches(const Match *matchList,
                                 const std::pair<size_t, size_t> & bestSpeciesRange,
                                 unordered_map<TaxID, unsigned int> & taxCnt,
                                 int queryLength);

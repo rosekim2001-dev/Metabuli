@@ -7,7 +7,21 @@
 #include "common.h"
 #include "SeqIterator.h"
 
+#ifdef OPENMP
+#include <omp.h>
+#endif
+
 using namespace std;
+
+namespace {
+inline size_t getThreadIdSafe() {
+#ifdef OPENMP
+    return static_cast<size_t>(omp_get_thread_num());
+#else
+    return 0;
+#endif
+}
+}
 
 void setPrintInfoDefault(LocalParameters &par) {
     par.infoBegin = 0;
@@ -61,7 +75,7 @@ int printInfo(int argc, const char **argv, const Command &command){
         // local_id2Cnt.resize(500'000'000);
         ReadBuffer<uint32_t> infoIdxFile(infoFileName, 1024 * 1024 * 16);
         // unordered_map<uint32_t, size_t> local_id2Cnt;
-        size_t threadId = omp_get_thread_num();
+        size_t threadId = getThreadIdSafe();
         size_t begin = ranges[threadId].first;
         size_t end = ranges[threadId].second;
         infoIdxFile.loadBufferAt(begin);

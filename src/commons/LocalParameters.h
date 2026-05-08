@@ -44,6 +44,7 @@ public:
     std::vector<MMseqsParameter*> editNames;
     std::vector<MMseqsParameter*> createnewtaxalist;
     std::vector<MMseqsParameter*> classifiedRefiner;
+    std::vector<MMseqsParameter*> refineReport;
     std::vector<MMseqsParameter*> validateDatabase;
     std::vector<MMseqsParameter*> makeBenchmarkSet;
     std::vector<MMseqsParameter*> buildUnirefDb;
@@ -96,6 +97,10 @@ public:
     PARAMETER(MAX_E_VALUE)
     PARAMETER(USE_ALL_MATCHES)
     PARAMETER(TIE_BRAKER)
+    PARAMETER(MIN_AVG_SCORE)
+    PARAMETER(MIN_CLADE_COUNT)
+    PARAMETER(MIN_CLADE_PROPORTION)
+    PARAMETER(PRINT_FILTERED_RESULTS)
 
     // extract
     PARAMETER(TARGET_TAX_ID)
@@ -124,8 +129,6 @@ public:
     PARAMETER(GTDB)
     PARAMETER(VALIDATE_INPUT)
     PARAMETER(READING_FRAME)
-    PARAMETER(STORE_KMER_POS)
-    PARAMETER(REP_GENOME_LIST)
     PARAMETER(NO_MASK_TAXA)
 
     // DB updated parameters
@@ -207,6 +210,10 @@ public:
     int minAaMatch;
     int minAaMatchEuk;
     std::string priorityTaxa;
+    float minAvgScore;
+    int minCladeCount;
+    float minCladeProportion;
+    std::string outFilteredResults;
     
 
     // Extract

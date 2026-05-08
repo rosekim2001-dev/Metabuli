@@ -147,6 +147,28 @@ void Taxonomer::chooseBestTaxon(uint32_t currentQuery,
     }
 
     sp2scoreSum[speciesScore.taxId] += speciesScore.score.idScore;
+    if (par.storeKmerPos) {
+        const int readLen = queryList[currentQuery].queryLength + queryList[currentQuery].queryLength2;
+        if (readLen > 0) {
+            sp2totalReadLength[speciesScore.taxId] += static_cast<uint64_t>(readLen);
+            std::vector<uint8_t> &bins = sp2coverage[speciesScore.taxId];
+            if (bins.empty()) {
+                bins.resize(65536, 0);
+            }
+            const int denom = std::max(1, readLen - 1);
+            for (size_t i = bestSpeciesRange.first; i < bestSpeciesRange.second; ++i) {
+                if (matchList[i].tKmer.tInfo.speciesId != speciesScore.taxId) {
+                    continue;
+                }
+                const int qPos = static_cast<int>(matchList[i].qKmer.qInfo.pos);
+                const int clampedPos = std::max(0, std::min(qPos, denom));
+                const int binIdx = 1 + ((clampedPos * 65534) / denom); // [1..65535]
+                if (bins[binIdx] < 255) {
+                    ++bins[binIdx];
+                }
+            }
+        }
+    }
     
     // If score is not enough, classify to the parent of the selected species
     if (speciesScore.score.idScore < par.minSpScore) {
@@ -437,10 +459,10 @@ TaxonScore Taxonomer::getBestSpeciesMatches(std::pair<size_t, size_t> & bestSpec
     return bestScore;                                 
 }
 
-void Taxonomer::sortMatchPath(std::vector<MatchPath> & matchPaths, size_t i) {
+void Taxonomer::sortMatchPath(std::vector<MatchPath<Match>> & matchPaths, size_t i) {
     if (par.scoreMode == 0) {
         sort(matchPaths.begin() + i, matchPaths.end(),
-         [](const MatchPath &a, const MatchPath &b) {
+         [](const MatchPath<Match> &a, const MatchPath<Match> &b) {
            if (a.score.idScore != b.score.idScore) {
              return a.score.idScore > b.score.idScore;
            }
@@ -451,7 +473,7 @@ void Taxonomer::sortMatchPath(std::vector<MatchPath> & matchPaths, size_t i) {
          });
     } else if (par.scoreMode == 1) {
         sort(matchPaths.begin() + i, matchPaths.end(),
-         [](const MatchPath &a, const MatchPath &b) {
+         [](const MatchPath<Match> &a, const MatchPath<Match> &b) {
            if (a.score.subScore != b.score.subScore) {
              return a.score.subScore > b.score.subScore;
            }
@@ -462,7 +484,7 @@ void Taxonomer::sortMatchPath(std::vector<MatchPath> & matchPaths, size_t i) {
          });
     } else {
         sort(matchPaths.begin() + i, matchPaths.end(),
-         [](const MatchPath &a, const MatchPath &b) {
+         [](const MatchPath<Match> &a, const MatchPath<Match> &b) {
            float aTotal = a.score.idScore + a.score.subScore;
            float bTotal = b.score.idScore + b.score.subScore;
            if (aTotal != bTotal) {
@@ -477,9 +499,9 @@ void Taxonomer::sortMatchPath(std::vector<MatchPath> & matchPaths, size_t i) {
 }
 
 MatchScore Taxonomer::combineMatchPaths(
-    vector<MatchPath> & matchPaths,
+    vector<MatchPath<Match>> & matchPaths,
     size_t matchPathStart,
-    vector<MatchPath> & combinedMatchPaths,
+    vector<MatchPath<Match>> & combinedMatchPaths,
     size_t combMatchPathStart,
     int queryLength) 
 {   
@@ -564,14 +586,14 @@ MatchScore Taxonomer::combineMatchPaths(
     return score;
 }
 
-bool Taxonomer::isMatchPathOverlapped(const MatchPath & matchPath1,
-                                      const MatchPath & matchPath2) {
+bool Taxonomer::isMatchPathOverlapped(const MatchPath<Match> & matchPath1,
+                                      const MatchPath<Match> & matchPath2) {
     return !((matchPath1.end < matchPath2.start) || (matchPath2.end < matchPath1.start));                                       
 }
 
 bool Taxonomer::trimSpacedMatchPath(
-    MatchPath & newPath, 
-    const MatchPath & existingPath, 
+    MatchPath<Match> & newPath, 
+    const MatchPath<Match> & existingPath, 
     int overlapLength) 
 {
     int overlapAaNum = 0;
@@ -628,8 +650,8 @@ bool Taxonomer::trimSpacedMatchPath(
 }
 
 bool Taxonomer::trimMatchPath2(
-    MatchPath & newPath, 
-    const MatchPath & existingPath, 
+    MatchPath<Match> & newPath, 
+    const MatchPath<Match> & existingPath, 
     int overlapLength) 
 {
     int overlapAaNum = 0;
@@ -672,8 +694,8 @@ bool Taxonomer::trimMatchPath2(
 }
 
 void Taxonomer::trimMatchPath(
-    MatchPath & newPath, 
-    const MatchPath & path2, 
+    MatchPath<Match> & newPath, 
+    const MatchPath<Match> & path2, 
     int overlapLength) 
 {
     if (newPath.start < path2.start) { 
@@ -739,10 +761,10 @@ void Taxonomer::trimMatchPath(
     }
 }
 
-MatchPath Taxonomer::makeMatchPath(
+MatchPath<Match> Taxonomer::makeMatchPath(
     const Match * match) 
 {
-    return MatchPath(
+    return MatchPath<Match>(
         match, 
         metamerPattern->calMatchScore(
             match->qKmer.value, 
@@ -756,7 +778,7 @@ MatchPath Taxonomer::makeMatchPath(
 void Taxonomer::getMatchPaths(
     const Match * matchList,
     size_t matchNum,
-    vector<MatchPath> & filteredMatchPaths,
+    vector<MatchPath<Match>> & filteredMatchPaths,
     TaxID speciesId) 
 {
     size_t i = 0;
@@ -794,7 +816,7 @@ void Taxonomer::getMatchPaths(
             if (shift > 0 && shift <= maxCodonShift) {
                 // Compare curPosMatches and nextPosMatches.
                 for (size_t nextIdx = nextPosMatchStart; nextIdx < nextPosMatchEnd; nextIdx++) {
-                    const MatchPath * bestPath = nullptr;
+                    const MatchPath<Match> * bestPath = nullptr;
                     MatchScore bestScore;
                     for (size_t curIdx = curPosMatchStart; curIdx < curPosMatchEnd; ++curIdx) {
                         if (metamerPattern->checkOverlap(matchList[curIdx].tKmer.value, matchList[nextIdx].tKmer.value, shift)) {
@@ -862,7 +884,7 @@ void Taxonomer::getMatchPaths(
             int shift = (nextPos - currPos) / 3;
             if (shift > 0 && shift <= maxCodonShift) {
                 for (size_t nextIdx = nextPosMatchStart; nextIdx < nextPosMatchEnd; nextIdx++) {
-                    const MatchPath * bestPath = nullptr;
+                    const MatchPath<Match> * bestPath = nullptr;
                     MatchScore bestScore;
                     for (size_t curIdx = curPosMatchStart; curIdx < curPosMatchEnd; ++curIdx) {
                         if (metamerPattern->checkOverlap(matchList[nextIdx].tKmer.value, matchList[curIdx].tKmer.value, shift)) {
@@ -916,7 +938,7 @@ void Taxonomer::makeSpacedMatchPath(
     const Match * match,
     size_t index)
 {
-    localMatchPaths[index] = MatchPath(match, kmerLen, metamerPattern->windowSize * 3);
+    localMatchPaths[index] = MatchPath<Match>(match, kmerLen, metamerPattern->windowSize * 3);
     localMatchPaths[index].score = metamerPattern->calMatchScore(
                                         match->qKmer.value, 
                                         match->tKmer.value);
@@ -945,7 +967,7 @@ void Taxonomer::makeSpacedMatchPath(
 void Taxonomer::getSpacedMatchPaths(
     const Match * matchList,
     size_t matchNum,
-    vector<MatchPath> & filteredMatchPaths,
+    vector<MatchPath<Match>> & filteredMatchPaths,
     TaxID speciesId) 
 {
     if (matchNum == 0) return;
@@ -982,7 +1004,7 @@ void Taxonomer::getSpacedMatchPaths(
         int shift = (nextPos - currPos) / 3;
         if (shift > 0 && shift <= maxCodonShift) {
             for (size_t nextIdx = nextPosMatchStart; nextIdx < nextPosMatchEnd; nextIdx++) {
-                const MatchPath * bestPath = nullptr;
+                const MatchPath<Match> * bestPath = nullptr;
                 MatchScore bestScore;
                 uint32_t bestHistoryMask = 0;
                 uint64_t bestLastCodons = 0;

@@ -12,6 +12,16 @@
 
 using namespace std;
 
+namespace {
+inline size_t getNumThreadsSafe() {
+#ifdef OPENMP
+    return static_cast<size_t>(omp_get_num_threads());
+#else
+    return 1;
+#endif
+}
+}
+
 
 int classifiedRefiner(const string &classifiedFile, const LocalParameters &par);
 bool checktaxId(TaxonomyWrapper *taxonomy, const vector <int> &contamIdx, const int &taxonomyId);
@@ -247,8 +257,8 @@ int classifiedRefiner(const string &classifiedFile, const LocalParameters &par) 
         #pragma omp single
         {   
             #ifdef OPENMP
-                resultChunk.resize(10000*omp_get_num_threads()); 
-                upperRanks.resize(10000*omp_get_num_threads());
+                resultChunk.resize(10000 * getNumThreadsSafe()); 
+                upperRanks.resize(10000 * getNumThreadsSafe());
             #else
                 resultChunk.resize(10000); 
                 upperRanks.resize(10000);
@@ -266,7 +276,7 @@ int classifiedRefiner(const string &classifiedFile, const LocalParameters &par) 
                 }
 
                 // chunkCnt condition check
-                if (chunkCnt > (size_t) 10 * omp_get_num_threads()) {
+                if (chunkCnt > (size_t) 10 * getNumThreadsSafe()) {
                     #pragma omp taskwait 
 
                     for (const string &line : resultChunk) {
@@ -274,7 +284,7 @@ int classifiedRefiner(const string &classifiedFile, const LocalParameters &par) 
                     }
 
                     resultChunk.clear();
-                    resultChunk.resize(10000 * omp_get_num_threads());
+                    resultChunk.resize(10000 * getNumThreadsSafe());
 
                     if(createUpperRanksFile==2){
                         for (const string &line : upperRanks) {
@@ -284,7 +294,7 @@ int classifiedRefiner(const string &classifiedFile, const LocalParameters &par) 
                         }
     
                         upperRanks.clear();
-                        upperRanks.resize(10000 * omp_get_num_threads());
+                        upperRanks.resize(10000 * getNumThreadsSafe());
                     }
                     
                     chunkCnt = 1;
@@ -306,7 +316,7 @@ int classifiedRefiner(const string &classifiedFile, const LocalParameters &par) 
                         }
     
                         upperRanks.clear();
-                        upperRanks.resize(10000 * omp_get_num_threads());
+                        upperRanks.resize(10000 * getNumThreadsSafe());
                     }
                     break;
                 }
@@ -447,5 +457,4 @@ bool checktaxId(TaxonomyWrapper *taxonomy, const vector <int> &contamIdx, const 
     }
     return false;
 }
-
 

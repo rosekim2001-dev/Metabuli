@@ -52,6 +52,12 @@ Classifier::Classifier(LocalParameters & par) : par(par) {
             metamerPattern = new SpacedPattern(std::make_unique<RegularGeneticCode>(), __builtin_popcount(mask), mask);
         }
     }
+    if (par.storeKmerPos) {
+        C_LOG2_C.resize(256);
+        for (int i = 1; i < 256; ++i) {
+            C_LOG2_C[i] = i * std::log2(static_cast<double>(i));
+        }
+    }
     kmerExtractor = new KmerExtractor(par, metamerPattern);
     queryIndexer = new QueryIndexer(par);
     kmerMatcher = new KmerMatcher(par, taxonomy, metamerPattern);
@@ -242,13 +248,13 @@ void Classifier::classifyReads() {
 
     std::unordered_map<TaxID, std::vector<TaxID>> parentToChildren = taxonomy->getParentToChildren();
     unordered_map<TaxID, TaxonCounts> cladeCounts = taxonomy->getCladeCounts(taxCounts, parentToChildren);
-    for (const auto & it : sp2score_global) {
-        sp2score_global[it.first] = it.second / cladeCounts[it.first].cladeCount;
+    for (const auto & it : sp2scoreSum_global) {
+        sp2scoreSum_global[it.first] = it.second / cladeCounts[it.first].cladeCount;
     }
-    rollUpScore(sp2score_global, parentToChildren, 1);
+    rollUpScore(sp2scoreSum_global, parentToChildren, 1);
 
     // Finalize original classification results
-    reporter->writeReportFile(processedReadCnt, cladeCounts, sp2score_global, ReportType::Default);
+    reporter->writeReportFile(processedReadCnt, taxCounts, ReportType::Default);
     std::cout << "Taxonomic classification completed." << std::endl;
 
 }
@@ -364,7 +370,7 @@ void Classifier::startClassify(const LocalParameters &par) {
     // Finalize original classification results
     cout << "Total k-mer match count: " << kmerMatcher->getTotalMatchCnt() << endl;    
     reporter->closeReadClassificationFile();
-    reporter->writeReportFile(totalSeqCnt, cladeCounts, ReportType::Default);
+    reporter->writeReportFile(totalSeqCnt, taxCounts, ReportType::Default);
     cout << "Taxonomic classification completed." << endl;
 
     // Perform EM algorithm    
@@ -375,10 +381,10 @@ void Classifier::startClassify(const LocalParameters &par) {
         em(totalSeqCnt);
         reporter->writeReclassifyResults(emResults);
         unordered_map<TaxID, TaxonCounts> emCladeCounts = taxonomy->getCladeCounts(emTaxCounts, parentToChildren);
-        reporter->writeReportFile(totalSeqCnt, emCladeCounts, ReportType::EM);
+        reporter->writeReportFile(totalSeqCnt, emTaxCounts, ReportType::EM);
 
         unordered_map<TaxID, TaxonCounts> reclassifyCladeCounts = taxonomy->getCladeCounts(reclassifyTaxCounts, parentToChildren);
-        reporter->writeReportFile(totalSeqCnt, reclassifyCladeCounts, ReportType::EM_RECLASSIFY);
+        reporter->writeReportFile(totalSeqCnt, reclassifyTaxCounts, ReportType::EM_RECLASSIFY);
     }
     
     return;
@@ -416,17 +422,37 @@ void Classifier::assignTaxonomy(const Match *matchList,
         #pragma omp for schedule(dynamic, 1)
         for (size_t i = 0; i < blockIdx; ++i) {
             taxonomer.chooseBestTaxon(matchBlocks[i].id - 1,
-                            matchBlocks[i].start,
-                            matchBlocks[i].end,
-                            matchList,
-                            queryList,
-                            par);
+                                      matchBlocks[i].start,
+                                      matchBlocks[i].end,
+                                      matchList,
+                                      queryList,
+                                      par);
         }
 
         #pragma omp critical
         {
             for (const auto & it : taxonomer.sp2scoreSum) {
-                sp2score_global[it.first] += it.second;
+                sp2scoreSum_global[it.first] += it.second;
+            }   
+
+            if (par.storeKmerPos) {
+                for (const auto &it : taxonomer.sp2totalReadLength) {
+                    sp2totalReadLength[it.first] += it.second;
+                }
+
+                for (const auto &it : taxonomer.sp2coverage) {
+                    const TaxID spId = it.first;
+                    const vector<uint8_t> &localBins = it.second;
+                    if (sp2coverage_global.find(spId) == sp2coverage_global.end()) {
+                        sp2coverage_global[spId].resize(65536, 0);
+                    }
+
+                    uint8_t *globalBins = sp2coverage_global[spId].data();
+                    for (int j = 0; j < 65536; ++j) {
+                        int sum = globalBins[j] + localBins[j];
+                        globalBins[j] = (sum > 255) ? 255 : static_cast<uint8_t>(sum);
+                    }
+                }
             }
         }    
     }
@@ -450,6 +476,7 @@ void Classifier::assignTaxonomy(const Match *matchList,
 namespace {
     static const double ABUNDANCE_EXP_TAU = 3.0;
     static const double ABUNDANCE_SMOOTH_EPS = 1e-8;
+    static const double COVERAGE_PRIOR_WEIGHT = 0.1;
     static const double SQUAREM_STEP_MIN = -1.0;
     static const double SQUAREM_STEP_MAX = 1.0;
     
@@ -541,56 +568,90 @@ void Classifier::em(size_t totalQueryCnt) {
         spList.push_back(sp);
     }
 
+    // Build coverage metrics from the original coverage stack when available.
+    // This keeps the EM prior aligned with the original coverage report pipeline.
+    if (sp2covMetric.empty() && !sp2coverage_global.empty()) {
+        if (sp2genomeSize.empty()) {
+            parseSp2GenomeSize();
+        }
+        const std::unordered_map<TaxID, std::vector<TaxID>> parentToChildren = taxonomy->getParentToChildren();
+        const unordered_map<TaxID, TaxonCounts> cladeCounts = taxonomy->getCladeCounts(taxCounts, parentToChildren);
+        for (const auto &it : sp2coverage_global) {
+            const TaxID spId = it.first;
+            const auto countIt = cladeCounts.find(spId);
+            if (countIt == cladeCounts.end() || countIt->second.cladeCount == 0) {
+                continue;
+            }
+            const uint64_t genomeSize = (sp2genomeSize.find(spId) != sp2genomeSize.end()) ? sp2genomeSize[spId] : 65536;
+            const uint64_t totalReadLen = (sp2totalReadLength.find(spId) != sp2totalReadLength.end()) ? sp2totalReadLength[spId] : 0;
+            sp2covMetric[spId] = calCovMetrics(it.second, countIt->second.cladeCount, totalReadLen, genomeSize);
+        }
+        rollUpCoverageMetrics(parentToChildren, cladeCounts, sp2covMetric, 1);
+    }
+
+    // Species-level coverage prior used in M-step smoothing.
+    std::unordered_map<TaxID, double> sp2coveragePrior;
+    sp2coveragePrior.reserve(spList.size());
+    for (const TaxID sp : spList) {
+        auto covIt = sp2covMetric.find(sp);
+        sp2coveragePrior[sp] = (covIt != sp2covMetric.end()) ? covIt->second.coverage : 0.0;
+    }
+
     const double alphaMax = 1.0;
     const int maxIter = 1000;
     const double convergenceTol = 1e-6;
     
     // SQUAREM acceleration: track multiple iterations
     std::vector<double> x0 = abundanceVectorFromMap(abundance, spList);
-    std::vector<double> logLikelihoods;
-    
     for (int iter = 0; iter < maxIter; ++iter) {
         // Annealed exponent increases from 0 to alphaMax over iterations
         const double abundanceExponent = alphaMax * (1.0 - std::exp(-static_cast<double>(iter + 1) / ABUNDANCE_EXP_TAU));
-        
-        // E-step: Compute posteriors with annealed exponent
-        #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundance, sp2lengthFactor, spList, abundanceExponent, ABUNDANCE_SMOOTH_EPS)
+
+        // M-step with coverage-prior smoothing:
+        // theta_tilde = responsibilities + kappa * coverage + eps
+        std::unordered_map<TaxID, double> abundanceUpdate;
+        abundanceUpdate.reserve(spList.size());
+        for (const TaxID sp : spList) {
+            abundanceUpdate[sp] = COVERAGE_PRIOR_WEIGHT * sp2coveragePrior[sp] + ABUNDANCE_SMOOTH_EPS;
+        }
+
+        #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundance, sp2lengthFactor, abundanceExponent, abundanceUpdate)
         {
-            std::unordered_map<TaxID, double> localAbundance;
-            
+            std::unordered_map<TaxID, double> localResponsibilities;
+
             #pragma omp for schedule(dynamic, 1)
             for (size_t i = 0; i < queryRanges.size(); ++i) {
                 double denom = 0.0;
                 std::vector<double> posteriors;
-                
-                // Calculate weighted posteriors with annealed exponent
+
                 for (size_t j = queryRanges[i].first; j < queryRanges[i].second; ++j) {
                     TaxID sp = mappingResList[j].speciesId;
                     double abundSmoothed = std::max(abundance[sp], ABUNDANCE_SMOOTH_EPS);
-                    double weight = mappingResList[j].score * 
-                                   std::pow(abundSmoothed, abundanceExponent) * 
+                    double weight = mappingResList[j].score *
+                                   std::pow(abundSmoothed, abundanceExponent) *
                                    sp2lengthFactor[sp];
                     posteriors.push_back(weight);
                     denom += weight;
                 }
-                
+
                 if (denom <= 0.0) { continue; }
-                
+
                 for (size_t j = queryRanges[i].first; j < queryRanges[i].second; ++j) {
                     TaxID sp = mappingResList[j].speciesId;
-                    double posterior = posteriors[j - queryRanges[i].first] / denom;
-                    localAbundance[sp] += posterior;
+                    const double posterior = posteriors[j - queryRanges[i].first] / denom;
+                    localResponsibilities[sp] += posterior;
                 }
             }
-            
-            // M-step: Update abundance
+
             #pragma omp critical
             {
-                for (const auto & spAbund : localAbundance) {
-                    abundance[spAbund.first] += spAbund.second;
+                for (const auto &spAbund : localResponsibilities) {
+                    abundanceUpdate[spAbund.first] += spAbund.second;
                 }
             }
         }
+
+        abundance.swap(abundanceUpdate);
         
         // Normalize abundance to sum to 1
         double totalAbundance = 0.0;
@@ -608,9 +669,15 @@ void Classifier::em(size_t totalQueryCnt) {
         
         // Perform second EM update for SQUAREM acceleration
         std::unordered_map<TaxID, double> abundanceX2 = abundance;
-        #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundanceX2, sp2lengthFactor, spList, abundanceExponent, ABUNDANCE_SMOOTH_EPS)
+        std::unordered_map<TaxID, double> abundanceX2Update;
+        abundanceX2Update.reserve(spList.size());
+        for (const TaxID sp : spList) {
+            abundanceX2Update[sp] = COVERAGE_PRIOR_WEIGHT * sp2coveragePrior[sp] + ABUNDANCE_SMOOTH_EPS;
+        }
+
+        #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundanceX2, sp2lengthFactor, abundanceExponent, ABUNDANCE_SMOOTH_EPS, abundanceX2Update)
         {
-            std::unordered_map<TaxID, double> localAbundance;
+            std::unordered_map<TaxID, double> localResponsibilities;
             
             #pragma omp for schedule(dynamic, 1)
             for (size_t i = 0; i < queryRanges.size(); ++i) {
@@ -632,17 +699,18 @@ void Classifier::em(size_t totalQueryCnt) {
                 for (size_t j = queryRanges[i].first; j < queryRanges[i].second; ++j) {
                     TaxID sp = mappingResList[j].speciesId;
                     double posterior = posteriors[j - queryRanges[i].first] / denom;
-                    localAbundance[sp] += posterior;
+                    localResponsibilities[sp] += posterior;
                 }
             }
             
             #pragma omp critical
             {
-                for (const auto & spAbund : localAbundance) {
-                    abundanceX2[spAbund.first] += spAbund.second;
+                for (const auto &spAbund : localResponsibilities) {
+                    abundanceX2Update[spAbund.first] += spAbund.second;
                 }
             }
         }
+        abundanceX2.swap(abundanceX2Update);
         
         // Normalize abundanceX2
         totalAbundance = 0.0;
@@ -871,6 +939,127 @@ void Classifier::loadOriginalResults(
         string queryName = columns[1];
         int length = atoi(columns[3].c_str());
         emResults.emplace_back(queryName, length);
+    }
+}
+
+CovMetric Classifier::calCovMetrics(
+    const std::vector<uint8_t>& bins,
+    int readCnt,
+    uint64_t totalReadLength,
+    uint64_t genomeSize)
+{
+    uint64_t totalCount = 0;
+    double sum_c_log_c = 0.0;
+    int occupiedBins = 0;
+
+    int occupiedMacroBins = 0;
+    bool macro_seen[256] = {false};
+
+    size_t binLimit = std::min(genomeSize + 1, static_cast<uint64_t>(65536));
+    for (size_t i = 1; i < binLimit; ++i) {
+        uint8_t count = bins[i];
+        if (count == 0) continue;
+
+        totalCount += count;
+        occupiedBins++;
+        sum_c_log_c += C_LOG2_C[count];
+
+        size_t macro_bin_idx = i >> 8;
+        if (!macro_seen[macro_bin_idx]) {
+            macro_seen[macro_bin_idx] = true;
+            occupiedMacroBins++;
+        }
+    }
+
+    if (totalCount == 0) {
+        return {0.0, 0.0, 0.0, 0.0, 0.0};
+    }
+
+    double effective_bins = std::min(65535.0, static_cast<double>(genomeSize));
+    if (effective_bins <= 1.0) {
+        return {0.0, 0.0, 0.0, 0.0, 0.0};
+    }
+
+    double max_macro_bins = std::ceil(effective_bins / 256.0);
+    max_macro_bins = std::min(max_macro_bins, 256.0);
+    double macro_coverage = static_cast<double>(occupiedMacroBins) / max_macro_bins;
+    macro_coverage = std::min(1.0, macro_coverage);
+
+    double coverage = static_cast<double>(occupiedBins) / effective_bins;
+    coverage = std::min(1.0, coverage);
+
+    double H_obs = std::log2(static_cast<double>(totalCount)) - (sum_c_log_c / totalCount);
+    H_obs = std::max(0.0, H_obs);
+
+    double max_H_standard = std::log2(effective_bins);
+    double evenness = (max_H_standard > 0.0001) ? std::min(1.0, H_obs / max_H_standard) : 0.0;
+
+    double read_length = static_cast<double>(totalReadLength) / readCnt;
+    double bin_size_bp = static_cast<double>(genomeSize) / effective_bins;
+    double bins_per_read = 1.0 + (read_length / bin_size_bp);
+    double expected_occupied = effective_bins * (1.0 - std::exp(-(readCnt * bins_per_read) / effective_bins));
+    double expected_max_H = std::log2(std::max(1.0, expected_occupied));
+
+    double adjustedEvenness = 0.0;
+    if (expected_max_H >= 0.0001) {
+        adjustedEvenness = std::min(1.0, H_obs / expected_max_H);
+    }
+
+    double unified_score = std::pow(2.0, H_obs) / effective_bins;
+    return {evenness, coverage, adjustedEvenness, unified_score, macro_coverage};
+}
+
+void Classifier::rollUpCoverageMetrics(
+    const std::unordered_map<TaxID, std::vector<TaxID>>& parentToChildren,
+    const std::unordered_map<TaxID, TaxonCounts>& cladeCounts,
+    std::unordered_map<TaxID, CovMetric>& allMetrics,
+    TaxID currentTaxID)
+{
+    if (allMetrics.find(currentTaxID) != allMetrics.end()) {
+        return;
+    }
+
+    auto childrenIt = parentToChildren.find(currentTaxID);
+    if (childrenIt == parentToChildren.end() || childrenIt->second.empty()) {
+        return;
+    }
+
+    double weightedEvenness = 0.0;
+    double weightedCoverage = 0.0;
+    double weightedAdjEvenness = 0.0;
+    double weightedUnifiedScore = 0.0;
+    double weightedAvgScore = 0.0;
+    double weightedMacroCoverage = 0.0;
+    uint64_t totalChildReads = 0;
+
+    for (TaxID childID : childrenIt->second) {
+        rollUpCoverageMetrics(parentToChildren, cladeCounts, allMetrics, childID);
+
+        auto countIt = cladeCounts.find(childID);
+        auto metricIt = allMetrics.find(childID);
+        if (countIt != cladeCounts.end() && metricIt != allMetrics.end()) {
+            uint64_t reads = countIt->second.cladeCount;
+            if (reads > 0) {
+                weightedEvenness += metricIt->second.evenness * reads;
+                weightedCoverage += metricIt->second.coverage * reads;
+                weightedAdjEvenness += metricIt->second.adjustedEvenness * reads;
+                weightedUnifiedScore += metricIt->second.unifiedScore * reads;
+                weightedAvgScore += metricIt->second.avgScore * reads;
+                weightedMacroCoverage += metricIt->second.macroCoverage * reads;
+                totalChildReads += reads;
+            }
+        }
+    }
+
+    if (totalChildReads > 0) {
+        CovMetric parentMetric;
+        parentMetric.evenness = weightedEvenness / static_cast<double>(totalChildReads);
+        parentMetric.coverage = weightedCoverage / static_cast<double>(totalChildReads);
+        parentMetric.adjustedEvenness = weightedAdjEvenness / static_cast<double>(totalChildReads);
+        parentMetric.unifiedScore = weightedUnifiedScore / static_cast<double>(totalChildReads);
+        parentMetric.avgScore = weightedAvgScore / static_cast<double>(totalChildReads);
+        parentMetric.macroCoverage = weightedMacroCoverage / static_cast<double>(totalChildReads);
+        allMetrics[currentTaxID] = parentMetric;
     }
 }
 

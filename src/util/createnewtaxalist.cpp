@@ -5,11 +5,23 @@
 #include <unordered_set>
 #include <iostream>
 #include <fstream>
+#ifdef OPENMP
 #include <omp.h>
+#endif
 #include "TaxonomyWrapper.h"
 #include "createnewtaxalist.h"
 #include "common.h"
 #include "IndexCreator.h"
+
+namespace {
+inline int getThreadIdSafe() {
+#ifdef OPENMP
+    return omp_get_thread_num();
+#else
+    return 0;
+#endif
+}
+}
 
 void getObservedAccessions(const std::string & fnaListFileName,
                            std::unordered_map<std::string, TaxID> & observedAccessions) {
@@ -136,7 +148,7 @@ int getTaxonomyOfAccessions(
     
  #pragma omp parallel
 {
-    int    tid = omp_get_thread_num();
+    int    tid = getThreadIdSafe();
     auto   begin = chunkBeg[tid];
     auto   finish = chunkEnd[tid];
     auto & hits  = localHits[tid];

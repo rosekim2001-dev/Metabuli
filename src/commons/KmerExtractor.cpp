@@ -1,6 +1,20 @@
 #include "KmerExtractor.h"
 #include <unordered_map>
 
+#ifdef OPENMP
+#include <omp.h>
+#endif
+
+namespace {
+inline int getThreadIdSafe() {
+#ifdef OPENMP
+    return omp_get_thread_num();
+#else
+    return 0;
+#endif
+}
+}
+
 KmerExtractor::KmerExtractor(
     const LocalParameters &par,
     const GeneticCode * geneticCode,
@@ -222,7 +236,7 @@ bool KmerExtractor::extractQueryKmers(
     freeBufferQueue, filledBufferQueue, kseq_1, kseq_2, queryIdx, chunkSize, processedSeqCnt, \
     producerBufferIndex, moreReads, readsPerThread_1, readsPerThread_2)
     {
-        int threadId = omp_get_thread_num();
+        int threadId = getThreadIdSafe();
         size_t maxReadLength1 = 1000;
         size_t maxReadLength2 = 1000;
         char *maskedSeq1 = new char[maxReadLength1];
@@ -1035,7 +1049,7 @@ bool KmerExtractor::extractKmers(
     #pragma omp parallel default(none) shared(par, seqLen, kmerBuffer, kseq, std::cout, \
     readsPerThread, seqNamesPerThread, chunkSize, filledBufferQueue, moreData, accession2index, savedSeq, producerBufferIndex, freeBufferQueue, idOffset)
     {
-        int threadId = omp_get_thread_num();
+        int threadId = getThreadIdSafe();
 
         if (threadId == 0) {
             bool bufferNotFull = true;
@@ -1158,7 +1172,7 @@ bool KmerExtractor::extractUnirefKmers(
     #pragma omp parallel default(none) shared(par, kmerBuffer, kseq, std::cout, processedSeqCnt, \
     readsPerThread, seqNamesPerThread, chunkSize, filledBufferQueue, unirefName2Id, moreData, savedSeq, producerBufferIndex, freeBufferQueue)
     {
-        int threadId = omp_get_thread_num();
+        int threadId = getThreadIdSafe();
 
         if (threadId == 0) {
             bool bufferNotFull = true;
@@ -1279,7 +1293,7 @@ bool KmerExtractor::extractQueryKmers_aa2aa(
     #pragma omp parallel default(none) shared(par, kmerBuffer, kseq, std::cout, processedSeqCnt, queryIdx, \
     readsPerThread, chunkSize, filledBufferQueue, moreData, savedSeq, producerBufferIndex, queryList, freeBufferQueue)
     {
-        int threadId = omp_get_thread_num();
+        int threadId = getThreadIdSafe();
 
         if (threadId == 0) {
             bool bufferNotFull = true;
@@ -1426,6 +1440,5 @@ void KmerExtractor::processSequenceChunk(
         
     }
 }
-
 
 
