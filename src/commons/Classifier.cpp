@@ -262,6 +262,7 @@ void Classifier::classifyReads() {
 void Classifier::startClassify(const LocalParameters &par) {
     Buffer<Kmer> queryKmerBuffer;
     Buffer<Match> matchBuffer;
+    Buffer<MatchWithPos> matchBufferWithPos;
     vector<Query> queryList;
     size_t numOfTatalQueryKmerCnt = 0;
     reporter->openReadClassificationFile();
@@ -307,17 +308,27 @@ void Classifier::startClassify(const LocalParameters &par) {
             // memset(queryKmerBuffer.buffer, 0, queryReadSplit[splitIdx].kmerCnt * sizeof(Kmer));
 
             // Allocate memory for match buffer
-            if (queryReadSplit.size() == 1) {
-                size_t remain = queryIndexer->getAvailableRam() 
-                                - (queryReadSplit[splitIdx].kmerCnt * sizeof(Kmer)) 
-                                - (queryIndexer->getReadNum_1() * 200); // TODO: check it later
-                matchBuffer.reallocateMemory(remain / sizeof(Match));
+            if (par.storeKmerPos) {
+                if (queryReadSplit.size() == 1) {
+                    size_t remain = queryIndexer->getAvailableRam()
+                                    - (queryReadSplit[splitIdx].kmerCnt * sizeof(Kmer))
+                                    - (queryIndexer->getReadNum_1() * 200); // TODO: check it later
+                    matchBufferWithPos.reallocateMemory(remain / sizeof(MatchWithPos));
+                } else {
+                    matchBufferWithPos.reallocateMemory(queryReadSplit[splitIdx].kmerCnt * matchPerKmer);
+                }
+                matchBufferWithPos.startIndexOfReserve = 0;
             } else {
-                matchBuffer.reallocateMemory(queryReadSplit[splitIdx].kmerCnt * matchPerKmer);
+                if (queryReadSplit.size() == 1) {
+                    size_t remain = queryIndexer->getAvailableRam()
+                                    - (queryReadSplit[splitIdx].kmerCnt * sizeof(Kmer))
+                                    - (queryIndexer->getReadNum_1() * 200); // TODO: check it later
+                    matchBuffer.reallocateMemory(remain / sizeof(Match));
+                } else {
+                    matchBuffer.reallocateMemory(queryReadSplit[splitIdx].kmerCnt * matchPerKmer);
+                }
+                matchBuffer.startIndexOfReserve = 0;
             }
-
-            // Initialize query k-mer buffer and match buffer
-            matchBuffer.startIndexOfReserve = 0;
 
             // Extract query k-mers
             kmerExtractor->extractQueryKmers(queryKmerBuffer,
@@ -329,14 +340,25 @@ void Classifier::startClassify(const LocalParameters &par) {
             
             // Search matches between query and target k-mers
             bool searchComplete = false;
-            searchComplete = kmerMatcher->matchKmers(&queryKmerBuffer, &matchBuffer, dbDir);
+            if (par.storeKmerPos) {
+                searchComplete = kmerMatcher->matchKmersWithPos(&queryKmerBuffer, &matchBufferWithPos, dbDir);
+                if (searchComplete) {
+                    cout << "K-mer match count      : " << kmerMatcher->getTotalMatchCnt() << endl;
+                    SORT_PARALLEL(matchBufferWithPos.buffer,
+                                  matchBufferWithPos.buffer + matchBufferWithPos.startIndexOfReserve,
+                                  MatchWithPos::compare);
+                    assignTaxonomy<MatchWithPos>(matchBufferWithPos.buffer, matchBufferWithPos.startIndexOfReserve, queryList, par);
+                }
+            } else {
+                searchComplete = kmerMatcher->matchKmers(&queryKmerBuffer, &matchBuffer, dbDir);
+                if (searchComplete) {
+                    cout << "K-mer match count      : " << kmerMatcher->getTotalMatchCnt() << endl;
+                    kmerMatcher->sortMatches(&matchBuffer);
+                    assignTaxonomy<Match>(matchBuffer.buffer, matchBuffer.startIndexOfReserve, queryList, par);
+                }
+            }
+
             if (searchComplete) {
-                cout << "K-mer match count      : " << kmerMatcher->getTotalMatchCnt() << endl;
-                kmerMatcher->sortMatches(&matchBuffer);
-                // for (size_t i = 0; matchBuffer.startIndexOfReserve < matchBuffer.startIndexOfReserve; i++) {
-                //     matchBuffer.buffer[i].printMatch();
-                // }
-                assignTaxonomy(matchBuffer.buffer, matchBuffer.startIndexOfReserve, queryList, par);
                 reporter->writeReadClassification(queryList);
                 if (par.em) {
                     reporter->writeMappings(queryList, processedReadCnt);
@@ -344,7 +366,6 @@ void Classifier::startClassify(const LocalParameters &par) {
                 }
                 processedReadCnt += queryReadSplit[splitIdx].readCnt;
                 cout << "Processed read count   : " << processedReadCnt << " (" << (double) processedReadCnt / (double) totalSeqCnt << ")" << endl;
-                // numOfTatalQueryKmerCnt += queryKmerBuffer.startIndexOfReserve;
             } else { // search was incomplete
                 matchPerKmer += 4;
                 cout << "--match-per-kmer was increased to " << matchPerKmer << " and searching again..." << endl;
@@ -390,7 +411,8 @@ void Classifier::startClassify(const LocalParameters &par) {
     return;
 }
 
-void Classifier::assignTaxonomy(const Match *matchList, 
+template <typename MatchType>
+void Classifier::assignTaxonomy(const MatchType *matchList,
                                size_t numOfMatches,
                                std::vector<Query> &queryList,
                                const LocalParameters &par) {
@@ -418,15 +440,15 @@ void Classifier::assignTaxonomy(const Match *matchList,
     // Process each block
 #pragma omp parallel default(none), shared(cout, matchBlocks, matchList, seqNum, queryList, blockIdx, par)
     {
-        Taxonomer taxonomer(par, taxonomy, metamerPattern);
+        Taxonomer<MatchType> taxonomer(par, taxonomy, metamerPattern);
         #pragma omp for schedule(dynamic, 1)
         for (size_t i = 0; i < blockIdx; ++i) {
-            taxonomer.chooseBestTaxon(matchBlocks[i].id - 1,
-                                      matchBlocks[i].start,
-                                      matchBlocks[i].end,
-                                      matchList,
-                                      queryList,
-                                      par);
+            taxonomer.chooseBestTaxon(
+                            matchBlocks[i].id - 1,
+                            matchBlocks[i].start,
+                            matchBlocks[i].end,
+                            matchList,
+                            queryList);
         }
 
         #pragma omp critical
@@ -440,9 +462,8 @@ void Classifier::assignTaxonomy(const Match *matchList,
                     sp2totalReadLength[it.first] += it.second;
                 }
 
-                for (const auto &it : taxonomer.sp2coverage) {
-                    const TaxID spId = it.first;
-                    const vector<uint8_t> &localBins = it.second;
+                for (auto& [spId, localArray] : taxonomer.sp2coverage) {
+                    const vector<uint8_t> &localBins = localArray;
                     if (sp2coverage_global.find(spId) == sp2coverage_global.end()) {
                         sp2coverage_global[spId].resize(65536, 0);
                     }

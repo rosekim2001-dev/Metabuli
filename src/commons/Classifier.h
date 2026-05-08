@@ -124,7 +124,8 @@ public:
         uint64_t queryListSize,
         uint64_t matchPerKmer);
 
-    void assignTaxonomy(const Match *matchList,
+    template <typename MatchType>
+    void assignTaxonomy(const MatchType *matchList,
                         size_t numOfMatches,
                         std::vector<Query> & queryList,
                         const LocalParameters &par);
