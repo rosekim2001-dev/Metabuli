@@ -118,17 +118,22 @@ protected:
 public:
     void classifyReads();
     void classifyReadsWithPos();
+    void startClassify(const LocalParameters &par);
 
     uint64_t calculateBufferSize(
         uint64_t queryListSize,
-        uint64_t matchPerKmer,
-        int mode);
+        uint64_t matchPerKmer);
 
     template <typename MatchType>
     void assignTaxonomy(const MatchType *matchList,
                         size_t numOfMatches,
                         std::vector<Query> & queryList,
                         const LocalParameters &par);
+
+    void rollUpScore(
+        std::unordered_map<TaxID, double> & sp2score_global,
+        const std::unordered_map<TaxID, std::vector<TaxID>> & parentToChildren,
+        TaxID currentTaxID);
 
     explicit Classifier(LocalParameters & par);
 
