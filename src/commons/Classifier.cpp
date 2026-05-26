@@ -6,6 +6,7 @@
 #include <variant>
 #include <algorithm>
 #include <iomanip>
+#include <numeric>
 
 Classifier::Classifier(LocalParameters & par) : par(par) {
     dbDir = par.filenames[1 + (par.seqMode == 2)];
@@ -572,14 +573,26 @@ namespace {
             return values[idx];
         };
 
-        size_t ge1e2 = 0, ge1e3 = 0, ge1e4 = 0, ge1e5 = 0, lt1e5 = 0;
-        for (double v : values) {
-            if (v >= 1e-2) ++ge1e2;
-            else if (v >= 1e-3) ++ge1e3;
-            else if (v >= 1e-4) ++ge1e4;
-            else if (v >= 1e-5) ++ge1e5;
-            else ++lt1e5;
-        }
+        const double totalMass = std::accumulate(values.begin(), values.end(), 0.0);
+        const auto cumulativeCountAtMassFraction = [&values, totalMass](double massFraction, size_t &count, double &countFrac) {
+            count = 0;
+            countFrac = 0.0;
+            if (values.empty() || totalMass <= 0.0 || massFraction <= 0.0) {
+                return;
+            }
+
+            const double targetMass = massFraction * totalMass;
+            double cumulativeMass = 0.0;
+            for (size_t i = 0; i < values.size(); ++i) {
+                if ((cumulativeMass + values[i]) <= targetMass) {
+                    cumulativeMass += values[i];
+                    ++count;
+                } else {
+                    break;
+                }
+            }
+            countFrac = static_cast<double>(count) / static_cast<double>(values.size());
+        };
 
         std::cout << std::fixed << std::setprecision(8);
         std::cout << "Abundance distribution (targets=" << values.size() << "):" << std::endl;
@@ -591,11 +604,17 @@ namespace {
                   << " p95=" << quantile(0.95)
                   << " p99=" << quantile(0.99)
                   << " max=" << values.back() << std::endl;
-        std::cout << "  bins: [>=1e-2]=" << ge1e2
-                  << " [1e-3,1e-2)=" << ge1e3
-                  << " [1e-4,1e-3)=" << ge1e4
-                  << " [1e-5,1e-4)=" << ge1e5
-                  << " [<1e-5]=" << lt1e5 << std::endl;
+        const double cutoffs[] = {0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.99};
+        std::cout << "  cumulative:";
+        for (size_t i = 0; i < sizeof(cutoffs) / sizeof(cutoffs[0]); ++i) {
+            size_t count = 0;
+            double countFrac = 0.0;
+            cumulativeCountAtMassFraction(cutoffs[i], count, countFrac);
+            std::cout << " <=" << cutoffs[i]
+                      << "[count=" << count
+                      << ",countFrac=" << countFrac << "]";
+        }
+        std::cout << std::endl;
     }
 }
 
