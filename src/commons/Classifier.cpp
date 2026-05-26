@@ -4,6 +4,8 @@
 #include "common.h"
 
 #include <variant>
+#include <algorithm>
+#include <iomanip>
 
 Classifier::Classifier(LocalParameters & par) : par(par) {
     dbDir = par.filenames[1 + (par.seqMode == 2)];
@@ -259,6 +261,11 @@ void Classifier::classifyReads() {
 
 }
 
+void Classifier::classifyReadsWithPos() {
+    // classifyReads() already contains the k-mer-position path guarded by par.storeKmerPos.
+    classifyReads();
+}
+
 void Classifier::startClassify(const LocalParameters &par) {
     Buffer<Kmer> queryKmerBuffer;
     Buffer<Match> matchBuffer;
@@ -497,7 +504,6 @@ void Classifier::assignTaxonomy(const MatchType *matchList,
 namespace {
     static const double ABUNDANCE_EXP_TAU = 3.0;
     static const double ABUNDANCE_SMOOTH_EPS = 1e-8;
-    static const double COVERAGE_PRIOR_WEIGHT = 0.1;
     static const double SQUAREM_STEP_MIN = -1.0;
     static const double SQUAREM_STEP_MAX = 1.0;
     
@@ -543,6 +549,53 @@ namespace {
         for (size_t i = 0; i < targetList.size(); ++i) {
             abundanceMap[targetList[i]] = abundanceVector[i];
         }
+    }
+
+    static void printAbundanceDistribution(
+        const std::unordered_map<TaxID, double> &abundanceMap,
+        const std::vector<TaxID> &targetList) {
+        if (targetList.empty()) {
+            std::cout << "Abundance distribution: no targets." << std::endl;
+            return;
+        }
+
+        std::vector<double> values;
+        values.reserve(targetList.size());
+        for (const TaxID sp : targetList) {
+            auto it = abundanceMap.find(sp);
+            values.push_back(it != abundanceMap.end() ? it->second : 0.0);
+        }
+        std::sort(values.begin(), values.end());
+
+        auto quantile = [&](double q) -> double {
+            const size_t idx = static_cast<size_t>(q * static_cast<double>(values.size() - 1));
+            return values[idx];
+        };
+
+        size_t ge1e2 = 0, ge1e3 = 0, ge1e4 = 0, ge1e5 = 0, lt1e5 = 0;
+        for (double v : values) {
+            if (v >= 1e-2) ++ge1e2;
+            else if (v >= 1e-3) ++ge1e3;
+            else if (v >= 1e-4) ++ge1e4;
+            else if (v >= 1e-5) ++ge1e5;
+            else ++lt1e5;
+        }
+
+        std::cout << std::fixed << std::setprecision(8);
+        std::cout << "Abundance distribution (targets=" << values.size() << "):" << std::endl;
+        std::cout << "  min=" << values.front()
+                  << " p25=" << quantile(0.25)
+                  << " p50=" << quantile(0.50)
+                  << " p75=" << quantile(0.75)
+                  << " p90=" << quantile(0.90)
+                  << " p95=" << quantile(0.95)
+                  << " p99=" << quantile(0.99)
+                  << " max=" << values.back() << std::endl;
+        std::cout << "  bins: [>=1e-2]=" << ge1e2
+                  << " [1e-3,1e-2)=" << ge1e3
+                  << " [1e-4,1e-3)=" << ge1e4
+                  << " [1e-5,1e-4)=" << ge1e5
+                  << " [<1e-5]=" << lt1e5 << std::endl;
     }
 }
 
@@ -610,17 +663,19 @@ void Classifier::em(size_t totalQueryCnt) {
         rollUpCoverageMetrics(parentToChildren, cladeCounts, sp2covMetric, 1);
     }
 
-    // Species-level coverage prior used in M-step smoothing.
-    std::unordered_map<TaxID, double> sp2coveragePrior;
-    sp2coveragePrior.reserve(spList.size());
+    // Species-level prior used in M-step smoothing.
+    // Use adjusted evenness as the EM prior signal.
+    std::unordered_map<TaxID, double> sp2adjustedEvennessPrior;
+    sp2adjustedEvennessPrior.reserve(spList.size());
     for (const TaxID sp : spList) {
         auto covIt = sp2covMetric.find(sp);
-        sp2coveragePrior[sp] = (covIt != sp2covMetric.end()) ? covIt->second.coverage : 0.0;
+        sp2adjustedEvennessPrior[sp] = (covIt != sp2covMetric.end()) ? covIt->second.adjustedEvenness : 0.0;
     }
 
     const double alphaMax = 1.0;
     const int maxIter = 1000;
     const double convergenceTol = 1e-6;
+    const double adjustedEvennessPriorWeight = std::max(0.0, par.covPriorWeight);
     
     // SQUAREM acceleration: track multiple iterations
     std::vector<double> x0 = abundanceVectorFromMap(abundance, spList);
@@ -628,15 +683,15 @@ void Classifier::em(size_t totalQueryCnt) {
         // Annealed exponent increases from 0 to alphaMax over iterations
         const double abundanceExponent = alphaMax * (1.0 - std::exp(-static_cast<double>(iter + 1) / ABUNDANCE_EXP_TAU));
 
-        // M-step with coverage-prior smoothing:
-        // theta_tilde = responsibilities + kappa * coverage + eps
+        // M-step with adjusted-evenness prior smoothing:
+        // theta_tilde = responsibilities + kappa * adjustedEvenness + eps
         std::unordered_map<TaxID, double> abundanceUpdate;
         abundanceUpdate.reserve(spList.size());
         for (const TaxID sp : spList) {
-            abundanceUpdate[sp] = COVERAGE_PRIOR_WEIGHT * sp2coveragePrior[sp] + ABUNDANCE_SMOOTH_EPS;
+            abundanceUpdate[sp] = adjustedEvennessPriorWeight * sp2adjustedEvennessPrior[sp] + ABUNDANCE_SMOOTH_EPS;
         }
 
-        #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundance, sp2lengthFactor, abundanceExponent, abundanceUpdate)
+        #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundance, sp2lengthFactor, abundanceExponent, ABUNDANCE_SMOOTH_EPS, abundanceUpdate)
         {
             std::unordered_map<TaxID, double> localResponsibilities;
 
@@ -693,7 +748,7 @@ void Classifier::em(size_t totalQueryCnt) {
         std::unordered_map<TaxID, double> abundanceX2Update;
         abundanceX2Update.reserve(spList.size());
         for (const TaxID sp : spList) {
-            abundanceX2Update[sp] = COVERAGE_PRIOR_WEIGHT * sp2coveragePrior[sp] + ABUNDANCE_SMOOTH_EPS;
+            abundanceX2Update[sp] = adjustedEvennessPriorWeight * sp2adjustedEvennessPrior[sp] + ABUNDANCE_SMOOTH_EPS;
         }
 
         #pragma omp parallel default(none) shared(queryRanges, mappingResList, abundanceX2, sp2lengthFactor, abundanceExponent, ABUNDANCE_SMOOTH_EPS, abundanceX2Update)
@@ -788,6 +843,7 @@ void Classifier::em(size_t totalQueryCnt) {
     for (const auto & sp : spList) {
         taxProbs[sp] = abundance[sp];
     }
+    printAbundanceDistribution(abundance, spList);
     
     size_t explainedQueryCount = 0;
     for (size_t i = 0; i < spList.size(); i++) {
@@ -806,7 +862,25 @@ void Classifier::reclassify(
     const vector<double> & sp2lengthFactor,
     size_t totalQueryCnt) 
 {
-    #pragma omp parallel default(none) shared(queryRanges, mappingResList, sp2lengthFactor, std::cout)
+    const double cumulativeThreshold = std::max(0.0, std::min(1.0, par.emCumulativeThreshold));
+    const double minAbundancePercentile = std::max(0.0, std::min(1.0, par.emMinAbundance));
+    std::vector<double> abundanceValues;
+    abundanceValues.reserve(taxProbs.size());
+    for (const auto &kv : taxProbs) {
+        abundanceValues.push_back(kv.second);
+    }
+    std::sort(abundanceValues.begin(), abundanceValues.end());
+    double minAbundanceThreshold = 0.0;
+    if (!abundanceValues.empty()) {
+        const size_t idx = static_cast<size_t>(
+            minAbundancePercentile * static_cast<double>(abundanceValues.size() - 1));
+        minAbundanceThreshold = abundanceValues[idx];
+    }
+
+    cout << "Abundance percentile cutoff p" << (minAbundancePercentile * 100.0)
+         << " => threshold " << minAbundanceThreshold << endl;
+
+    #pragma omp parallel default(none) shared(queryRanges, mappingResList, sp2lengthFactor, cumulativeThreshold, minAbundanceThreshold, std::cout)
     {
         std::vector<std::pair<TaxID, double>> sp2prob;
         std::vector<TaxID> candidateSpecies;
@@ -823,6 +897,9 @@ void Classifier::reclassify(
                 const TaxID sp = mappingResList[j].speciesId;
                 const auto probIt = taxProbs.find(sp);
                 const double prob = (probIt == taxProbs.end()) ? 0.0 : probIt->second;
+                if (prob < minAbundanceThreshold) {
+                    continue;
+                }
                 double score = prob * mappingResList[j].score * sp2lengthFactor[sp];
                 denom += score;
                 sp2prob.emplace_back(sp, score);
@@ -843,9 +920,14 @@ void Classifier::reclassify(
                       });
 
             double sum = 0.0;
-            for (size_t j = 0; j < sp2prob.size() && sum < 0.5; ++j) {
+            for (size_t j = 0; j < sp2prob.size() && sum < cumulativeThreshold; ++j) {
                 sum += sp2prob[j].second;
                 candidateSpecies.push_back(sp2prob[j].first);
+            }
+            if (candidateSpecies.empty()) {
+                emResults[currentQuery].taxId = 0;
+                emResults[currentQuery].score = 0.0;
+                continue;
             }
             emResults[currentQuery].taxId = taxonomy->LCA(candidateSpecies)->taxId;
             emResults[currentQuery].score = sum;

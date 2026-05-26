@@ -434,16 +434,18 @@ TaxonScore Taxonomer<MatchType>::getBestSpeciesMatches(std::pair<size_t, size_t>
         return bestScore;
     }
 
-    // if (par.em && !sp2score.empty()) {
-    //     sort(sp2score.begin(), sp2score.end(),
-    //          [](const pair<TaxID, float> &a, const pair<TaxID, float> &b) {
-    //              return a.second > b.second;
-    //          });
-    //     query.topSpeciesId = sp2score[0].first;
-    //     for (size_t i = 0; i < 10 && i < sp2score.size(); i++) {
-    //         query.species2Score.emplace_back(sp2score[i].first, sp2score[i].second * sp2score[i].second);
-    //     }
-    // }
+    if (par.em && !sp2score.empty()) {
+        sort(sp2score.begin(), sp2score.end(),
+             [this](const pair<TaxID, MatchScore> &a, const pair<TaxID, MatchScore> &b) {
+                 return a.second.isLargerThan(b.second, par.scoreMode);
+             });
+        query.topSpeciesId = sp2score[0].first;
+        query.species2Score.clear();
+        for (size_t i = 0; i < 10 && i < sp2score.size(); i++) {
+            const float emScore = sp2score[i].second.idScore * sp2score[i].second.idScore;
+            query.species2Score.emplace_back(sp2score[i].first, emScore);
+        }
+    }
 
     maxSpecies.clear();
 
@@ -1248,4 +1250,3 @@ void Taxonomer<MatchType>::ensureArraySize(size_t newSize) {
 
 template class Taxonomer<Match>;
 template class Taxonomer<MatchWithPos>;
-

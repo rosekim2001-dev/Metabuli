@@ -256,6 +256,28 @@ LocalParameters::LocalParameters() :
                  typeid(std::string),
                  (void *) &priorityTaxa,
                  "^.*$"),
+        COV_PRIOR_WEIGHT(COV_PRIOR_WEIGHT_ID,
+                "--cov-prior-weight",
+                "Weight for adjusted-evenness prior in EM M-step",
+                "Weight for adjusted-evenness prior in EM M-step (>=0). Default: 0.1",
+                typeid(double),
+                (void *) &covPriorWeight,
+                "^([0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?)$"),
+        EM_CUMULATIVE_THRESHOLD(EM_CUMULATIVE_THRESHOLD_ID,
+                "--em-cumulative-threshold",
+                "Cumulative posterior threshold for EM reclassification",
+                "Cumulative posterior threshold for EM reclassification (0.0-1.0). Default: 0.6",
+                typeid(double),
+                (void *) &emCumulativeThreshold,
+                "^0(\\.[0-9]+)?|1(\\.0+)?$"),
+        EM_MIN_ABUNDANCE(EM_MIN_ABUNDANCE_ID,
+                "--min-abundance",
+                "Minimum abundance percentile allowed during EM reclassification",
+                "Percentile cutoff for target abundance in EM reclassification (0.0-1.0). "
+                "Example: 0.5 means filter targets below p50 abundance. Default: 0.0",
+                typeid(double),
+                (void *) &emMinAbundance,
+                "^0(\\.[0-9]+)?|1(\\.0+)?$"),
         MIN_AVG_SCORE(MIN_AVG_SCORE_ID,
                 "--min-avg-score",
                 "Min. average score for classification",
@@ -740,6 +762,9 @@ LocalParameters::LocalParameters() :
     classify.push_back(&DB_TOTAL_LENGTH);
     classify.push_back(&MAX_SHIFT);
     classify.push_back(&EM);
+    classify.push_back(&COV_PRIOR_WEIGHT);
+    classify.push_back(&EM_CUMULATIVE_THRESHOLD);
+    classify.push_back(&EM_MIN_ABUNDANCE);
 
     assignUniref.push_back(&PARAM_THREADS);
     assignUniref.push_back(&RAM_USAGE);

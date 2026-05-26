@@ -97,6 +97,9 @@ public:
     PARAMETER(MAX_E_VALUE)
     PARAMETER(USE_ALL_MATCHES)
     PARAMETER(TIE_BRAKER)
+    PARAMETER(COV_PRIOR_WEIGHT)
+    PARAMETER(EM_CUMULATIVE_THRESHOLD)
+    PARAMETER(EM_MIN_ABUNDANCE)
     PARAMETER(MIN_AVG_SCORE)
     PARAMETER(MIN_CLADE_COUNT)
     PARAMETER(MIN_CLADE_PROPORTION)
@@ -210,6 +213,9 @@ public:
     int minAaMatch;
     int minAaMatchEuk;
     std::string priorityTaxa;
+    double covPriorWeight;
+    double emCumulativeThreshold;
+    double emMinAbundance;
     float minAvgScore;
     int minCladeCount;
     float minCladeProportion;
