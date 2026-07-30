@@ -1,3 +1,4 @@
+// 6 choices version
 #include "Classifier.h"
 #include "Parameters.h"
 #include "LocalParameters.h"
@@ -38,6 +39,7 @@ void setClassifyDefaults(LocalParameters & par){
     par.useAllMatches = 0;
     par.em = false;
     par.covPriorWeight = 0.1;
+    par.emPriorMetric = "adjustedEvenness";
     par.emCumulativeThreshold = 0.6;
     par.emMinAbundance = 0.0;
     par.pdmKmer = 0;

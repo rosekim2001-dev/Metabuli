@@ -1,3 +1,4 @@
+// 6 choices version
 #include "Classifier.h"
 #include "FileUtil.h"
 #include "QueryIndexer.h"
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <numeric>
+#include <cctype>
 
 Classifier::Classifier(LocalParameters & par) : par(par) {
     dbDir = par.filenames[1 + (par.seqMode == 2)];
@@ -530,6 +532,62 @@ namespace {
         }
         return projected;
     }
+
+    static inline std::string normalizePriorMetricName(std::string name) {
+        for (size_t i = 0; i < name.size(); ++i) {
+            name[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(name[i])));
+        }
+        return name;
+    }
+
+    static inline double mmseqsConfidenceFromBins(const std::vector<uint8_t> &bins, uint64_t genomeSize) {
+        const double effectiveBins = std::min(65535.0, static_cast<double>(genomeSize));
+        if (effectiveBins <= 0.0) {
+            return 0.0;
+        }
+
+        const size_t binLimit = static_cast<size_t>(std::min<uint64_t>(genomeSize + 1, 65536));
+        double covered = 0.0;
+        double squaredCovered = 0.0;
+        for (size_t i = 1; i < binLimit; ++i) {
+            // MMseqs-style clipped per-position confidence surrogate on available binned counts.
+            const double conf = std::min(1.0, static_cast<double>(bins[i]) / 255.0);
+            covered += conf;
+            squaredCovered += conf * conf;
+        }
+
+        const double fraction = covered / effectiveBins;
+        const double hhi = (covered > 0.0) ? (squaredCovered / (covered * covered)) : 1.0;
+        const double concentrationPenalty = 1.0 - hhi;
+        return clamp01(fraction * concentrationPenalty);
+    }
+
+    static inline double selectEmPriorValue(const CovMetric &metric,
+                                            const std::string &normalizedPriorMetric,
+                                            double mmseqsConfidence) {
+        if (normalizedPriorMetric == "evenness") {
+            return metric.evenness;
+        }
+        if (normalizedPriorMetric == "coverage") {
+            return metric.coverage;
+        }
+        if (normalizedPriorMetric == "adjustedevenness") {
+            return metric.adjustedEvenness;
+        }
+        if (normalizedPriorMetric == "unified_score") {
+            return metric.unifiedScore;
+        }
+        if (normalizedPriorMetric == "macro_coverage") {
+            return metric.macroCoverage;
+        }
+        if (normalizedPriorMetric == "avgscore" || normalizedPriorMetric == "avg_score") {
+            return metric.avgScore;
+        }
+        if (normalizedPriorMetric == "mmseqs_confidence") {
+            return mmseqsConfidence;
+        }
+        return metric.adjustedEvenness;
+    }
     
     static std::vector<double> abundanceVectorFromMap(
         const std::unordered_map<TaxID, double> &abundanceMap,
@@ -678,18 +736,56 @@ void Classifier::em(size_t totalQueryCnt) {
             const uint64_t genomeSize = (sp2genomeSize.find(spId) != sp2genomeSize.end()) ? sp2genomeSize[spId] : 65536;
             const uint64_t totalReadLen = (sp2totalReadLength.find(spId) != sp2totalReadLength.end()) ? sp2totalReadLength[spId] : 0;
             sp2covMetric[spId] = calCovMetrics(it.second, countIt->second.cladeCount, totalReadLen, genomeSize);
+            const auto scoreIt = sp2scoreSum_global.find(spId);
+            sp2covMetric[spId].avgScore = (scoreIt != sp2scoreSum_global.end())
+                                           ? (scoreIt->second / countIt->second.cladeCount)
+                                           : 0.0;
         }
         rollUpCoverageMetrics(parentToChildren, cladeCounts, sp2covMetric, 1);
     }
 
     // Species-level prior used in M-step smoothing.
-    // Use adjusted evenness as the EM prior signal.
+    const std::string priorMetric = normalizePriorMetricName(par.emPriorMetric);
+    const bool validPriorMetric = (priorMetric == "evenness" ||
+                                   priorMetric == "coverage" ||
+                                   priorMetric == "adjustedevenness" ||
+                                   priorMetric == "unified_score" ||
+                                   priorMetric == "macro_coverage" ||
+                                   priorMetric == "avgscore" ||
+                                   priorMetric == "avg_score" ||
+                                   priorMetric == "mmseqs_confidence");
+    if (validPriorMetric == false) {
+        std::cout << "Warning: unknown --em-prior-metric value '" << par.emPriorMetric
+                  << "'. Falling back to adjustedEvenness." << std::endl;
+    }
+    std::unordered_map<TaxID, double> sp2mmseqsConfidencePrior;
+    if (priorMetric == "mmseqs_confidence") {
+        sp2mmseqsConfidencePrior.reserve(spList.size());
+        for (const TaxID sp : spList) {
+            const auto binsIt = sp2coverage_global.find(sp);
+            if (binsIt == sp2coverage_global.end()) {
+                sp2mmseqsConfidencePrior[sp] = 0.0;
+                continue;
+            }
+            const uint64_t genomeSize = (sp2genomeSize.find(sp) != sp2genomeSize.end()) ? sp2genomeSize[sp] : 65536;
+            sp2mmseqsConfidencePrior[sp] = mmseqsConfidenceFromBins(binsIt->second, genomeSize);
+        }
+    }
+
     std::unordered_map<TaxID, double> sp2adjustedEvennessPrior;
     sp2adjustedEvennessPrior.reserve(spList.size());
     for (const TaxID sp : spList) {
         auto covIt = sp2covMetric.find(sp);
-        sp2adjustedEvennessPrior[sp] = (covIt != sp2covMetric.end()) ? covIt->second.adjustedEvenness : 0.0;
+        const CovMetric metric = (covIt != sp2covMetric.end()) ? covIt->second : CovMetric{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        const double mmseqsConfidence = (priorMetric == "mmseqs_confidence")
+                                          ? sp2mmseqsConfidencePrior[sp]
+                                          : 0.0;
+        sp2adjustedEvennessPrior[sp] = selectEmPriorValue(metric,
+                                                          validPriorMetric ? priorMetric : std::string("adjustedevenness"),
+                                                          mmseqsConfidence);
     }
+
+    std::cout << "EM prior metric: " << (validPriorMetric ? priorMetric : "adjustedevenness") << std::endl;
 
     const double alphaMax = 1.0;
     const int maxIter = 1000;
@@ -1094,12 +1190,12 @@ CovMetric Classifier::calCovMetrics(
     }
 
     if (totalCount == 0) {
-        return {0.0, 0.0, 0.0, 0.0, 0.0};
+        return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     }
 
     double effective_bins = std::min(65535.0, static_cast<double>(genomeSize));
     if (effective_bins <= 1.0) {
-        return {0.0, 0.0, 0.0, 0.0, 0.0};
+        return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     }
 
     double max_macro_bins = std::ceil(effective_bins / 256.0);
@@ -1128,7 +1224,7 @@ CovMetric Classifier::calCovMetrics(
     }
 
     double unified_score = std::pow(2.0, H_obs) / effective_bins;
-    return {evenness, coverage, adjustedEvenness, unified_score, macro_coverage};
+    return {evenness, coverage, adjustedEvenness, unified_score, macro_coverage, 0.0};
 }
 
 void Classifier::rollUpCoverageMetrics(

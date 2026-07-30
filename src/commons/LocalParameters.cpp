@@ -1,3 +1,4 @@
+// 6 choices version
 #include "LocalParameters.h"
 #include "Parameters.h"
 #include "Parameters.cpp"
@@ -263,6 +264,15 @@ LocalParameters::LocalParameters() :
                 typeid(double),
                 (void *) &covPriorWeight,
                 "^([0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?)$"),
+        EM_PRIOR_METRIC(EM_PRIOR_METRIC_ID,
+                "--em-prior-metric",
+                "Prior metric for EM M-step smoothing",
+                "Prior metric for EM M-step smoothing. "
+                "Choices: evenness, coverage, adjustedEvenness, unified_score, macro_coverage, avgscore, mmseqs_confidence. "
+                "Default: adjustedEvenness",
+                typeid(std::string),
+                (void *) &emPriorMetric,
+                "^.*$"),
         EM_CUMULATIVE_THRESHOLD(EM_CUMULATIVE_THRESHOLD_ID,
                 "--em-cumulative-threshold",
                 "Cumulative posterior threshold for EM reclassification",
@@ -763,6 +773,7 @@ LocalParameters::LocalParameters() :
     classify.push_back(&MAX_SHIFT);
     classify.push_back(&EM);
     classify.push_back(&COV_PRIOR_WEIGHT);
+    classify.push_back(&EM_PRIOR_METRIC);
     classify.push_back(&EM_CUMULATIVE_THRESHOLD);
     classify.push_back(&EM_MIN_ABUNDANCE);
 

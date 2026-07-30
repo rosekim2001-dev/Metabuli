@@ -1,3 +1,4 @@
+// 6 choices version
 #ifndef ADCLASSIFIER2_LOCALPARAMETERS_H
 #define ADCLASSIFIER2_LOCALPARAMETERS_H
 
@@ -98,6 +99,7 @@ public:
     PARAMETER(USE_ALL_MATCHES)
     PARAMETER(TIE_BRAKER)
     PARAMETER(COV_PRIOR_WEIGHT)
+    PARAMETER(EM_PRIOR_METRIC)
     PARAMETER(EM_CUMULATIVE_THRESHOLD)
     PARAMETER(EM_MIN_ABUNDANCE)
     PARAMETER(MIN_AVG_SCORE)
@@ -214,6 +216,7 @@ public:
     int minAaMatchEuk;
     std::string priorityTaxa;
     double covPriorWeight;
+    std::string emPriorMetric;
     double emCumulativeThreshold;
     double emMinAbundance;
     float minAvgScore;
