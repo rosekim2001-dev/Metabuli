@@ -32,6 +32,7 @@ public:
     std::vector<MMseqsParameter*> createCandidates;
     std::vector<MMseqsParameter*> filterCandidates;
     std::vector<MMseqsParameter*> viewCandidates;
+    std::vector<MMseqsParameter*> emAlgorithm;
     std::vector<MMseqsParameter*> groupGeneration;
     std::vector<MMseqsParameter*> extract;
     std::vector<MMseqsParameter*> filter;
@@ -130,6 +131,18 @@ public:
     PARAMETER(MIN_CLADE_COUNT)
     PARAMETER(MIN_CLADE_PROPORTION)
     PARAMETER(PRINT_FILTERED_RESULTS)
+
+    // em: EM abundance estimation + reclassification from a candidate DB.
+    // The M-step prior and its weight.
+    PARAMETER(PRIOR_MASS)
+    // Reclassification (posterior -> taxon) knobs.
+    PARAMETER(LCA_POSTERIOR)
+    PARAMETER(MIN_READS)
+    // Iteration control.
+    PARAMETER(MAX_ITER)
+    PARAMETER(TOL)
+    // Likelihood-weight shape: score^power * abundance * lengthFactor.
+    PARAMETER(SCORE_POWER)
 
     // extract
     PARAMETER(TARGET_TAX_ID)
@@ -264,6 +277,14 @@ public:
     int minCladeCount;
     float minCladeProportion;
     std::string outFilteredResults;
+
+    // em: EM abundance estimation + reclassification from a candidate DB
+    double priorMass;      // phi: uniform pseudocount as a fraction of total read mass
+    double lcaPosterior;   // reclassify: stop adding species once posterior mass reaches this
+    int minReads;          // reclassify: drop species with theta * R below this
+    int maxIter;           // hard iteration cap
+    double tol;            // convergence tolerance on max|theta_new - theta_old|
+    double scorePower;     // exponent applied to the candidate idScore
 
     // Extract
     int targetTaxId;

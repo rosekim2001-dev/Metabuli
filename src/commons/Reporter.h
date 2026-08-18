@@ -206,6 +206,13 @@ public:
         Reporter::readClassificationFileName = readClassificationFileName;
     }
 
+    // The standalone "em" module derives its own output paths, so it sets the EM
+    // report names directly instead of going through the classify outDir/jobId branch.
+    void setEmReportFileNames(const string &emReport, const string &emReclassifyReport) {
+        Reporter::reportFileName_em = emReport;
+        Reporter::reportFileName_em_reclassify = emReclassifyReport;
+    }
+
     std::string getClassificationFileName() const {
         return readClassificationFileName;
     }

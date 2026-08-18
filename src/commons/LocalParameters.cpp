@@ -455,6 +455,52 @@ LocalParameters::LocalParameters() :
                 typeid(std::string),
                 (void *) &outFilteredResults,
                 "^.*$"),
+        PRIOR_MASS(PRIOR_MASS_ID,
+                "--prior-mass",
+                "em: uniform M-step pseudocount, as a fraction of total read mass",
+                "em: adds phi * R / S to every species in the M-step, where R is the number of reads with "
+                "candidates and S the species count. 0 disables it. Default: 0.01",
+                typeid(double),
+                (void *) &priorMass,
+                "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
+        LCA_POSTERIOR(LCA_POSTERIOR_ID,
+                "--lca-posterior",
+                "em: cumulative posterior mass used to reclassify a read",
+                "em: per read, take species best-first until their normalized posteriors sum to this much, then assign their LCA (0.0-1.0). "
+                "Lower = more specific (often a single species); higher = more conservative (higher-rank LCA). Default: 0.7",
+                typeid(double),
+                (void *) &lcaPosterior,
+                "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
+        MIN_READS(MIN_READS_ID,
+                "--min-reads",
+                "em: min. expected read count for a species to survive reclassification",
+                "em: ignore species whose expected read count theta * R falls below this when reclassifying, where R is "
+                "the number of reads with candidates. Applied after EM, so the estimated abundances themselves are "
+                "unaffected. 0 keeps every species. Default: 10",
+                typeid(int),
+                (void *) &minReads,
+                "^[0-9]+$"),
+        MAX_ITER(MAX_ITER_ID,
+                "--max-iter",
+                "em: max number of EM iterations",
+                "em: hard cap on EM iterations. Default: 1000",
+                typeid(int),
+                (void *) &maxIter,
+                "^[1-9][0-9]*$"),
+        TOL(TOL_ID,
+                "--tol",
+                "em: convergence tolerance",
+                "em: converged once max|theta_new - theta_old| over all species falls below this. Default: 1e-6",
+                typeid(double),
+                (void *) &tol,
+                "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
+        SCORE_POWER(SCORE_POWER_ID,
+                "--score-power",
+                "em: exponent applied to the candidate idScore",
+                "em: the likelihood weight uses idScore^p. p=1 uses the raw score; larger p sharpens the per-read posterior. Default: 3.0",
+                typeid(double),
+                (void *) &scorePower,
+                "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
         TARGET_TAX_ID(TARGET_TAX_ID_ID,
                "--tax-id",
                "Tax. ID of clade. -1 for unclassified reads",
@@ -804,6 +850,14 @@ LocalParameters::LocalParameters() :
     minAdjEvenness = 0.5f;
     minEukContigLen = 0;
     covUseAllHits = 1;
+
+    // em
+    priorMass = 0.01;
+    lcaPosterior = 0.7;
+    minReads = 10;
+    maxIter = 1000;
+    tol = 1e-6;
+    scorePower = 3.0;
     // Superkingdom taxonomy id
     virusTaxId = 10239;
     bacteriaTaxId = 2;
@@ -1030,6 +1084,20 @@ LocalParameters::LocalParameters() :
     filterCandidates.push_back(&MIN_STRONG_READS);
     filterCandidates.push_back(&MIN_UNIQUE_READS);
     filterCandidates.push_back(&TIE_RATIO);
+
+    // em (EM abundance estimation + reclassification from a candidate DB)
+    emAlgorithm.push_back(&PARAM_THREADS);
+    emAlgorithm.push_back(&PRINT_LINEAGE);
+    // M-step prior
+    emAlgorithm.push_back(&PRIOR_MASS);
+    // likelihood weight shape
+    emAlgorithm.push_back(&SCORE_POWER);
+    // iteration control
+    emAlgorithm.push_back(&MAX_ITER);
+    emAlgorithm.push_back(&TOL);
+    // reclassification
+    emAlgorithm.push_back(&LCA_POSTERIOR);
+    emAlgorithm.push_back(&MIN_READS);
 
     // view-candidates (dump a species-candidate DB to human-readable TSV)
     viewCandidates.push_back(&PARAM_THREADS);
