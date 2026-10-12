@@ -4,6 +4,8 @@ set(workflow_source_files
         workflow/create-candidates.cpp
         workflow/filter-candidates.cpp
         workflow/em.cpp
+        workflow/groupGeneration.cpp
+        workflow/groupApplication.cpp
         workflow/updateDB.cpp
         workflow/add_to_library.cpp
         workflow/build.cpp

@@ -87,7 +87,23 @@ int create_common_kmer_list(int argc, const char **argv, const Command &command)
                             true);
 
     IndexCreator idxCre(par, taxonomy, par.kmerFormat);
-    idxCre.createCommonKmerIndex();  
+    idxCre.createCommonKmerIndex();
+
+    // Record how the k-mers were built. The grouping workflow compares its own --syncmer /
+    // --smer-len against this and refuses to run on a mismatch: the two k-mer spaces would not
+    // line up and the common-k-mer filter would remove nothing, without any error.
+    {
+        const string paramFile = dbDir + "/kmer_params";
+        ofstream out(paramFile);
+        if (!out.is_open()) {
+            cerr << "Error opening file: " << paramFile << endl;
+            return 1;
+        }
+        out << "syncmer " << par.syncmer << "\n"
+            << "smer_len " << par.smerLen << "\n"
+            << "kmer_format " << par.kmerFormat << "\n";
+        out.close();
+    }
     delete taxonomy;
     return 0;
 }

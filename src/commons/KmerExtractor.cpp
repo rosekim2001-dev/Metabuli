@@ -34,6 +34,13 @@ KmerExtractor::KmerExtractor(
             exit(EXIT_FAILURE);
         }
     }
+    // getKmerCount() sizes each read's reservation from these. The MetamerPattern
+    // constructor sets them; this one used to leave them uninitialized, so query
+    // extraction through it (read grouping) counted 0 k-mers per read. The window is
+    // the k-mer length and the ratio 1 = the exact upper bound (every position, as
+    // QueryIndexer sizes the buffers), which is safe for syncmers too.
+    windowSize = kmerLen;
+    syncmerRatio = 1.0f;
     spaceNum = 0;
     maskMode = par.maskMode;
     maskProb = par.maskProb;

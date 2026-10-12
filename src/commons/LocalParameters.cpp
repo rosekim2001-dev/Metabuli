@@ -372,12 +372,14 @@ LocalParameters::LocalParameters() :
                  (void *) &unclassified,
                  "^[0-1]$"),
         QUERY_FILE(QUERY_FILE_ID,
-                 "--query-file",
-                 "Original query FASTA/Q for --unclassified (classify-candidates)",
-                 "Original query FASTA/Q read file(s) used to build the candidate DB, needed by --unclassified in classify-candidates. Comma-separate two files for paired-end.",
-                 typeid(std::string),
-                 (void *) &queryFile,
-                 "^.*$"),
+                "--query-file",
+                "Original FASTA/Q read file(s), comma-separated for paired-end",
+                "Original FASTA/Q read file(s) in the order create-candidates saw them, comma-separated for "
+                "paired-end (R1,R2). Used by classify-candidates --unclassified and by em --read-groupings 1 "
+                "to group the reads itself",
+                typeid(std::string),
+                (void *) &queryFile,
+                "^.*$"),
         MIN_AVG_SCORE(MIN_AVG_SCORE_ID,
                 "--min-avg-score",
                 "Min. average score for classification",
@@ -501,6 +503,26 @@ LocalParameters::LocalParameters() :
                 typeid(double),
                 (void *) &scorePower,
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
+        READ_GROUPINGS(READ_GROUPINGS_ID,
+                "--read-groupings",
+                "em: 1 = run the EM over read groups instead of single reads",
+                "em: 1 pools the candidates of all reads in a group into one EM query. Its score for a species is the "
+                "sum of the members' idScores divided by the group's read count; reads in no group stay single queries, "
+                "and every read is reclassified with its group's posterior. The groups live in <out dir>/grouping "
+                "(groupMap, groups): em builds them there from --query-file and --common-kmer-db, or reuses what is "
+                "already there. 0 = per-read EM. Default: 0",
+                typeid(int),
+                (void *) &readGroupings,
+                "^[0-1]$"),
+        GROUP_WEIGHT(GROUP_WEIGHT_ID,
+                "--group-weight",
+                "em: 1 = a read group weighs its read count in the M-step, 0 = every query weighs 1",
+                "em: with --read-groupings 1, 1 lets a group of n reads contribute n reads of posterior mass, so "
+                "abundances and expected read counts stay in read units; 0 counts every group once, like a single "
+                "read. Default: 1",
+                typeid(int),
+                (void *) &groupWeight,
+                "^[0-1]$"),
         TARGET_TAX_ID(TARGET_TAX_ID_ID,
                "--tax-id",
                "Tax. ID of clade. -1 for unclassified reads",
@@ -550,6 +572,79 @@ LocalParameters::LocalParameters() :
                     typeid(int),
                     (void *) &weightMode,
                     "[0-2]"),
+        MAX_KMER_READS(MAX_KMER_READS_ID,
+                "--max-kmer-reads",
+                "Skip k-mers shared by more than this many reads (0=disabled)",
+                "Skip k-mers shared by more than this many reads (0=disabled). Absolute cap, so it bounds the "
+                "C(m,2) edges a single k-mer can emit regardless of dataset size. Usually left at 0 so that "
+                "--max-kmer-quantile picks the cap from the data.",
+                typeid(int),
+                (void *) &maxKmerReads,
+                "^[0-9]+$"),
+        MAX_KMER_QUANTILE(MAX_KMER_QUANTILE_ID,
+                "--max-kmer-quantile",
+                "Share of k-mers the reads-per-k-mer cap keeps (0=disabled)",
+                "Picks --max-kmer-reads from the data: the cap becomes the smallest power-of-two bound covering "
+                "this share of the k-mers that occur in at least two reads. Ignored when --max-kmer-reads is "
+                "given; 0 disables it. Default: 0.995",
+                typeid(float),
+                (void *) &maxKmerQuantile,
+                "^[0-9]*\\.?[0-9]+$"),
+        MIN_OVERLAP_RATIO(MIN_OVERLAP_RATIO_ID,
+                "--min-overlap-ratio",
+                "Phase 1 core threshold as a fraction of k-mers per read",
+                "Phase 1 core threshold as a fraction of k-mers per read. An edge weight is the number of k-mers "
+                "two reads share, so this is the minimum overlap two reads must have to be grouped. Must be > 0. "
+                "Default: 0.5",
+                typeid(float),
+                (void *) &minOverlapRatio,
+                "^0(\\.[0-9]+)?|1(\\.0+)?$"),
+        WEAK_BAND_RATIO(WEAK_BAND_RATIO_ID,
+                "--weak-band-ratio",
+                "Weak-band lower bound as a fraction of the core threshold",
+                "Lower bound of the weak band as a fraction of the Phase 1 core threshold: weak edges have a "
+                "weight in (ratio x core, core] and lighter edges are not used at all. The same value is the "
+                "singleton pass's floor. Clamped into [1, core - 1]. Default: 0.3333",
+                typeid(float),
+                (void *) &weakBandRatio,
+                "^[0-9]*\\.?[0-9]+$"),
+        PARTITIONS(PARTITIONS_ID,
+                "--partitions",
+                "Intermediate partitions for the edge graph (0=follow --threads)",
+                "How many partitions the edge graph is split into on disk; a flush writes 3*partitions files. "
+                "Does not change the grouping, only the file layout. 0 makes it follow --threads, kept to "
+                "reproduce old runs. Default: 16",
+                typeid(int),
+                (void *) &partitions,
+                "^[0-9]+$"),
+        COMMON_KMER_SPAN(COMMON_KMER_SPAN_ID,
+                "--common-kmer-span",
+                "K-mers discarded either side of a common-k-mer hit (0=the hit alone)",
+                "Every query k-mer found in the common k-mer DB is removed before the graph is built. This "
+                "decides how far the removal reaches: 0 drops the hit alone, 1 drops three k-mers per hit. "
+                "Default: 0",
+                typeid(int),
+                (void *) &commonKmerSpan,
+                "^[0-9]+$"),
+        MAX_TMP_DISK(MAX_TMP_DISK_ID,
+                "--max-tmp-disk",
+                "Peak disk (MiB) the grouping intermediates may occupy (0: 80% of free space)",
+                "Upper bound on the space the subGraph_* intermediates may hold at once. A safety cap, not a "
+                "performance target: results are identical either way. 0 derives it from the free space at the "
+                "output directory.",
+                typeid(int),
+                (void *) &maxTmpDiskMiB,
+                "^[0-9]+$"),
+        COMMON_KMER_DB(COMMON_KMER_DB_ID,
+                "--common-kmer-db",
+                "em: common k-mer DB (from create-common-kmer-list) to group the reads against",
+                "em: with --read-groupings 1, the reads named by --query-file are grouped against this common k-mer DB "
+                "before the EM, into <out dir>/grouping, with the `grouping` command's defaults; its k-mer settings "
+                "(kmer_params) are adopted. To use a grouping tuned with `metabuli grouping`, put its groupMap and "
+                "groups into <out dir>/grouping and leave --query-file and --common-kmer-db out",
+                typeid(std::string),
+                (void *) &commonKmerDb,
+                "^.*$"),
         LIBRARY_PATH(LIBRARY_PATH_ID,
                      "--library-path",
                      "Path to library where the FASTA files are stored",
@@ -858,6 +953,22 @@ LocalParameters::LocalParameters() :
     maxIter = 1000;
     tol = 1e-6;
     scorePower = 3.0;
+    readGroupings = 0;
+    groupWeight = 1;
+    commonKmerDb = "";
+    // read grouping (GroupGenerator); setGroupGenerationDefaults() re-applies the same values
+    maxKmerReads = 0;
+    maxKmerQuantile = 0.995f;
+    minOverlapRatio = 0.5f;
+    weakBandRatio = 0.3333f;
+    partitions = 16;
+    edgeMode = 0;
+    commonKmerSpan = 0;
+    maxTmpDiskMiB = 0;
+    minEdgeWeight = 10;
+    neighborKmers = 1;
+    weightMode = 1;
+    minVoteScr = 0.15f;
     // Superkingdom taxonomy id
     virusTaxId = 10239;
     bacteriaTaxId = 2;
@@ -1098,6 +1209,13 @@ LocalParameters::LocalParameters() :
     // reclassification
     emAlgorithm.push_back(&LCA_POSTERIOR);
     emAlgorithm.push_back(&MIN_READS);
+    // read grouping
+    emAlgorithm.push_back(&READ_GROUPINGS);
+    emAlgorithm.push_back(&GROUP_WEIGHT);
+    // built-in grouping inputs (used when --group-dir is not given); the grouping itself runs
+    // with the `grouping` command's defaults -- tune it there, not here
+    emAlgorithm.push_back(&QUERY_FILE);
+    emAlgorithm.push_back(&COMMON_KMER_DB);
 
     // view-candidates (dump a species-candidate DB to human-readable TSV)
     viewCandidates.push_back(&PARAM_THREADS);
@@ -1123,19 +1241,30 @@ LocalParameters::LocalParameters() :
     groupGeneration.push_back(&SEQ_MODE);
     groupGeneration.push_back(&RAM_USAGE);
     groupGeneration.push_back(&MATCH_PER_KMER);
-    groupGeneration.push_back(&PARAM_MASK_RESIDUES);
-    groupGeneration.push_back(&PARAM_MASK_PROBABILTY);
-    groupGeneration.push_back(&VALIDATE_INPUT);
     groupGeneration.push_back(&SYNCMER);
     groupGeneration.push_back(&SMER_LEN);
-    groupGeneration.push_back(&MIN_EDGE_WEIGHT);
-    groupGeneration.push_back(&NEIGHBOR_KMERS);
+    groupGeneration.push_back(&MAX_KMER_READS);
+    groupGeneration.push_back(&MAX_KMER_QUANTILE);
+    groupGeneration.push_back(&MIN_OVERLAP_RATIO);
+    groupGeneration.push_back(&WEAK_BAND_RATIO);
+    groupGeneration.push_back(&PARTITIONS);
+    groupGeneration.push_back(&COMMON_KMER_SPAN);
+    groupGeneration.push_back(&MAX_TMP_DISK);
     groupGeneration.push_back(&PRINT_LOG);
-    groupGeneration.push_back(&PARAM_MAJORITY);
-    groupGeneration.push_back(&MIN_VOTE_SCORE);
-    groupGeneration.push_back(&SCORE_COL);
-    groupGeneration.push_back(&WEIGHT_MODE);
- 
+
+    // easy-grouping takes exactly grouping's parameters. The edge mode is not among them: the
+    // command is what selects it.
+    easyGroupGeneration = groupGeneration;
+
+    //groupApplication
+    groupApplication.push_back(&SEQ_MODE);
+    groupApplication.push_back(&RAM_USAGE);
+    groupApplication.push_back(&PARAM_THREADS);
+    groupApplication.push_back(&MIN_VOTE_SCORE);
+    groupApplication.push_back(&SCORE_COL);
+    groupApplication.push_back(&READID_COL);
+    groupApplication.push_back(&TAXID_COL);
+    groupApplication.push_back(&WEIGHT_MODE);
 
     // filter 
     filter.push_back(&PARAM_THREADS);

@@ -470,6 +470,13 @@ void Classifier::classifyReads() {
             } else {
                 matchPerKmer *= 2;
                 moreReads = true;
+                // The outer loop reopens the read files and skips processedReadCnt reads, so the
+                // read set aside when the k-mer buffer filled up will be read again from the
+                // file. Keeping it here would emit it twice and shift every later key by one.
+                savedSeq_1->name.clear();
+                savedSeq_1->s.clear();
+                savedSeq_2->name.clear();
+                savedSeq_2->s.clear();
                 std::cout << "--match-per-kmer was increased to " << matchPerKmer << " and searching again..." << std::endl;
                 break;
             }
@@ -637,6 +644,13 @@ void Classifier::generateCandidatesImpl() {
             } else {
                 matchPerKmer *= 2;
                 moreReads = true;
+                // The outer loop reopens the read files and skips processedReadCnt reads, so the
+                // read set aside when the k-mer buffer filled up will be read again from the
+                // file. Keeping it here would emit it twice and shift every later key by one.
+                savedSeq_1->name.clear();
+                savedSeq_1->s.clear();
+                savedSeq_2->name.clear();
+                savedSeq_2->s.clear();
                 std::cout << "--match-per-kmer was increased to " << matchPerKmer << " and searching again..." << std::endl;
                 break;
             }
@@ -809,6 +823,13 @@ void Classifier::classifyReadsWithPos() {
             } else {
                 matchPerKmer *= 2;
                 moreReads = true;
+                // The outer loop reopens the read files and skips processedReadCnt reads, so the
+                // read set aside when the k-mer buffer filled up will be read again from the
+                // file. Keeping it here would emit it twice and shift every later key by one.
+                savedSeq_1->name.clear();
+                savedSeq_1->s.clear();
+                savedSeq_2->name.clear();
+                savedSeq_2->s.clear();
                 std::cout << "--match-per-kmer was increased to " << matchPerKmer << " and searching again..." << std::endl;
                 break;
             }

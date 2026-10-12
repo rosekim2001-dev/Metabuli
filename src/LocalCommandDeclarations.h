@@ -10,6 +10,9 @@ extern int createCandidates(int argc, const char **argv, const Command& command)
 extern int filterCandidates(int argc, const char **argv, const Command& command);
 extern int viewCandidates(int argc, const char **argv, const Command& command);
 extern int emAlgorithm(int argc, const char **argv, const Command& command);
+extern int groupGeneration(int argc, const char **argv, const Command& command);
+extern int easyGroupGeneration(int argc, const char **argv, const Command& command);
+extern int groupApplication(int argc, const char **argv, const Command& command);
 extern int grade(int argc, const char **argv, const Command& command);
 extern int evaluateCandidates(int argc, const char **argv, const Command& command);
 extern int gradeByCladeSize(int argc, const char **argv, const Command& command);

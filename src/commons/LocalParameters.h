@@ -34,6 +34,8 @@ public:
     std::vector<MMseqsParameter*> viewCandidates;
     std::vector<MMseqsParameter*> emAlgorithm;
     std::vector<MMseqsParameter*> groupGeneration;
+    std::vector<MMseqsParameter*> easyGroupGeneration;
+    std::vector<MMseqsParameter*> groupApplication;
     std::vector<MMseqsParameter*> extract;
     std::vector<MMseqsParameter*> filter;
     std::vector<MMseqsParameter*> exclusiontest_hiv;
@@ -143,18 +145,42 @@ public:
     PARAMETER(TOL)
     // Likelihood-weight shape: score^power * abundance * lengthFactor.
     PARAMETER(SCORE_POWER)
+    // Read grouping: pool each read group's candidates into one EM query.
+    PARAMETER(READ_GROUPINGS)
+    PARAMETER(GROUP_WEIGHT)
 
     // extract
     PARAMETER(TARGET_TAX_ID)
     PARAMETER(EXTRACT_MODE)
     PARAMETER(PARAM_OUTDIR)
 
-    // Group generation
+    // Group generation (read-group/GroupGenerator, ported from the Metabuli_work fork)
     PARAMETER(MIN_EDGE_WEIGHT)
     PARAMETER(MIN_VOTE_SCORE)
     PARAMETER(SCORE_COL)
     PARAMETER(WEIGHT_MODE)
+    PARAMETER(MAX_KMER_READS)
+    PARAMETER(MAX_KMER_QUANTILE)
+    PARAMETER(MIN_OVERLAP_RATIO)
+    PARAMETER(WEAK_BAND_RATIO)
+    PARAMETER(PARTITIONS)
+    PARAMETER(COMMON_KMER_SPAN)
+    PARAMETER(MAX_TMP_DISK)
+    // em: common k-mer DB for the built-in read grouping
+    PARAMETER(COMMON_KMER_DB)
     int weightMode;
+    // Both thresholds are ratios so that one value means the same overlap across datasets
+    // with different read lengths and syncmer density. commonKmerSpan counts k-mer
+    // positions on a read, which is already the unit the read geometry gives it.
+    float weakBandRatio;      // weak-band lower bound as a fraction of the core threshold
+    int partitions;           // intermediate partitions; 0 = follow --threads (reproduction only)
+    int edgeMode;             // 0 = clique C(m,2), 1 = center-star. Set by the command, not a flag
+    int maxKmerReads;         // explicit reads-per-k-mer cap; 0 defers to maxKmerQuantile
+    float maxKmerQuantile;    // share of k-mers (m >= 2) the cap keeps; picks maxKmerReads
+    float minOverlapRatio;    // core threshold as a fraction of k-mers per read
+    int commonKmerSpan;       // k-mers discarded either side of a common-k-mer hit; 0 = hit alone
+    int maxTmpDiskMiB;        // peak disk for the grouping intermediates; 0 = 80% of free space
+    std::string commonKmerDb; // em --read-groupings 1: common k-mer DB to group the reads against
 
 
     // DB build parameters
@@ -285,6 +311,8 @@ public:
     int maxIter;           // hard iteration cap
     double tol;            // convergence tolerance on max|theta_new - theta_old|
     double scorePower;     // exponent applied to the candidate idScore
+    int readGroupings;     // 1: run the EM over read groups (<out dir>/grouping) instead of single reads
+    int groupWeight;       // 1: a group carries its read count in the M-step, 0: every query counts once
 
     // Extract
     int targetTaxId;
