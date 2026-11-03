@@ -260,7 +260,8 @@ protected:
     );
 
     size_t AminoAcidPart(size_t kmer) {
-        if (kmerFormat == 3 || kmerFormat == 4) {
+        // 3, 4, 5 carry no DNA bits to mask off (5 is the syncmer form of 3).
+        if (kmerFormat == 3 || kmerFormat == 4 || kmerFormat == 5) {
             return kmer;
         }
         return (kmer) & MARKER;
@@ -273,13 +274,19 @@ protected:
         constexpr double MEGABYTE = 1024.0 * 1024.0;
         constexpr double MEMORY_PER_THREAD_MB = 50.0;
         
+        // --max-ram is a ceiling, not a demand. Asking for 128 GiB on a 16 GB machine used
+        // to size a 90 GB buffer, and the calloc for it returned null.
+        const size_t declared = static_cast<size_t>(maxRam * GIGABYTE);
+        const size_t usable = std::min(declared, availableMemoryBytes());
+        maxRam = static_cast<size_t>(usable / GIGABYTE);
+
         float c = 0.7f;
         if (maxRam < 16) {
             c = 0.5f;
         } else if (maxRam <= 32) {
             c = 0.6f;
         }
-        double totalRamBytes = maxRam * GIGABYTE * c;
+        double totalRamBytes = usable * c;
         double memoryForThreads = par.threads * MEMORY_PER_THREAD_MB * MEGABYTE;
         double availableMemory = totalRamBytes - memoryForThreads;
 
@@ -293,19 +300,25 @@ protected:
     }
 
     size_t calculateBufferSizeForMerge(size_t maxRam, int fileCnt) {
+        constexpr double GIGABYTE = 1024.0 * 1024.0 * 1024.0;
+        const size_t usable = std::min(static_cast<size_t>(maxRam * GIGABYTE), availableMemoryBytes());
+        maxRam = static_cast<size_t>(usable / GIGABYTE);
+
+        // Tested small to large. The old order asked maxRam <= 32 first, so the < 16 arm
+        // could never be reached.
         float c = 0.7;
-        if (maxRam <= 32) {
-            c = 0.6;
-        } else if (maxRam < 16) {
+        if (maxRam < 16) {
             c = 0.5;
+        } else if (maxRam <= 32) {
+            c = 0.6;
         }
-        if ((maxRam * 1024.0 * 1024.0 * 1024.0 * c - (par.threads * 50.0 * 1024.0 * 1024.0)) <= 0.0) {
+        const double forBuffer = usable * c - (par.threads * 50.0 * 1024.0 * 1024.0);
+        if (forBuffer <= 0.0) {
             cerr << "Not enough memory to create index" << endl;
             cerr << "Please increase the RAM usage or decrease the number of threads" << endl;
             exit(EXIT_FAILURE);
         }
-        return static_cast<size_t>((maxRam * 1024.0 * 1024.0 * 1024.0 * c - (par.threads * 50.0 * 1024.0 * 1024.0))/ 
-                                  (sizeof(Kmer) + sizeof(size_t)));
+        return static_cast<size_t>(forBuffer / (sizeof(Kmer) + sizeof(size_t)));
     }
 
     void loadMergedTaxIds(const std::string &mergedFile, unordered_map<TaxID, TaxID> & old2new);
@@ -385,9 +398,13 @@ public:
     int getNumOfFlush() const { return numOfFlush; }
     TaxonomyWrapper* getTaxonomy() const { return taxonomy;}
     unordered_set<TaxID> getTaxIdSet() { return taxIdSet; }
+    int getKmerLen() const { return kmerExtractor->getKmerLen(); }
 
     // Setters
     void setIsUpdating(bool isUpdating) { this->isUpdating = isUpdating; }
+    // For the taxonomy-free constructor: sets the taxonomy and resolves the taxon lists
+    // (--no-mask-taxa, --skip-prodigal-taxa) the taxonomy-taking constructor resolves.
+    void setTaxonomy(TaxonomyWrapper * taxonomy);
     void setIsNewFormat(int kmerFormat) { this->kmerFormat = kmerFormat; }
     void addFilesToMerge(string diffIdxFileName, string infoFileName, string posFileName = "");
     void updateTaxId2SpeciesTaxId(const string & taxIdListFileName);
@@ -416,7 +433,13 @@ public:
 
 template <FilterMode M>
 void IndexCreator::mergeTargetFiles() {
-    size_t bufferSize = 1024 * 1024 * 512;
+    // 512 Mi entries was hardcoded: 1 GB of uint16 plus 2 GB of uint32, whatever --max-ram
+    // said and whatever the index's size was. An eighth of the usable budget, floored so a
+    // tiny run still writes in reasonable chunks, and capped at the old size.
+    const size_t writeBudget = std::min(static_cast<size_t>(par.ramUsage) * 1024 * 1024 * 1024,
+                                        availableMemoryBytes()) / 8;
+    size_t bufferSize = std::max<size_t>(1024 * 1024, std::min<size_t>(1024 * 1024 * 512,
+                                         writeBudget / (sizeof(uint16_t) + sizeof(uint32_t))));
     WriteBuffer<uint16_t> diffBuffer(mergedDeltaIdxFileName, bufferSize);
     WriteBuffer<uint32_t> infoBuffer(mergedInfoFileName, bufferSize);
     WriteBuffer<uint16_t> posBuffer(mergedPosFileName, bufferSize);
@@ -463,11 +486,16 @@ void IndexCreator::mergeTargetFiles() {
     int splitCheck = 0;
 
     cout << "Merging target files..." << endl;
-    size_t kmerBufferSize = 1024 * 1024 * 1024;
+    // Was a hardcoded 2^30 entries, 16 GB of Kmer, which ignored --max-ram and could not be
+    // allocated on a machine smaller than that. Now sized from --max-ram, but never above the
+    // old 2^30 so a large machine does not start holding more than it used to. The floor below
+    // is what the loop needs.
+    size_t kmerBufferSize = std::min<size_t>(1024 * 1024 * 1024,
+                                             calculateBufferSizeForMerge(par.ramUsage, (int) splitNum));
     if (kmerBufferSize < valueBufferSize * splitNum * 2) {
         kmerBufferSize = valueBufferSize * splitNum * 2; 
     }
-    Buffer<Kmer> kmerBuffer(kmerBufferSize); // 64GB
+    Buffer<Kmer> kmerBuffer(kmerBufferSize);
     std::atomic<int> hasOverflow{0};
     std::vector<std::atomic<bool>> completedSplits(splitNum);
     int remainingSplits = splitNum;

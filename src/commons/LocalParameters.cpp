@@ -496,21 +496,37 @@ LocalParameters::LocalParameters() :
                 typeid(double),
                 (void *) &tol,
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
+        EM_SCORE_MODE(EM_SCORE_MODE_ID,
+                "--em-score-mode",
+                "em: how a candidate's score becomes its likelihood weight",
+                "em: 0 = idScore^p (--score-power). 1 = exp(lambda * (S - S_best)), where S = idScore * read length "
+                "is the read's match score in nucleotides (a matching codon adds 3, one with a single mismatch 1.5) "
+                "and S_best is the read's best candidate (--lambda). Default: 1",
+                typeid(int),
+                (void *) &emScoreMode,
+                "^[0-1]$"),
+        EM_LAMBDA(EM_LAMBDA_ID,
+                "--lambda",
+                "em: lambda of --em-score-mode 1, per nucleotide of match score",
+                "em: the weight of a candidate S nucleotides of match score below the read's best is exp(-lambda * S), "
+                "the scale an alignment score's lambda plays. One mismatched nucleotide costs 1.5, so it divides the "
+                "weight by exp(1.5 * lambda). Larger lambda trusts the score more and the abundance less. Default: 0.1",
+                typeid(double),
+                (void *) &emLambda,
+                "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
         SCORE_POWER(SCORE_POWER_ID,
                 "--score-power",
-                "em: exponent applied to the candidate idScore",
-                "em: the likelihood weight uses idScore^p. p=1 uses the raw score; larger p sharpens the per-read posterior. Default: 3.0",
+                "em: exponent applied to the candidate idScore (--em-score-mode 0)",
+                "em: with --em-score-mode 0 the likelihood weight uses idScore^p. p=1 uses the raw score; larger p sharpens the per-read posterior. Default: 3.0",
                 typeid(double),
                 (void *) &scorePower,
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
         READ_GROUPINGS(READ_GROUPINGS_ID,
                 "--read-groupings",
                 "em: 1 = run the EM over read groups instead of single reads",
-                "em: 1 pools the candidates of all reads in a group into one EM query. Its score for a species is the "
-                "sum of the members' idScores divided by the group's read count; reads in no group stay single queries, "
-                "and every read is reclassified with its group's posterior. The groups live in <out dir>/grouping "
-                "(groupMap, groups): em builds them there from --query-file and --common-kmer-db, or reuses what is "
-                "already there. 0 = per-read EM. Default: 0",
+                "em: 1 makes each read group one EM query, scored by its members' mean score per species; ungrouped "
+                "reads stay single. Groups come from <out dir>/grouping, built there from --query-file and "
+                "--common-kmer-db if given. 0 = per-read EM. Default: 0",
                 typeid(int),
                 (void *) &readGroupings,
                 "^[0-1]$"),
@@ -523,6 +539,17 @@ LocalParameters::LocalParameters() :
                 typeid(int),
                 (void *) &groupWeight,
                 "^[0-1]$"),
+        GROUP_MAX_IDSCORE(GROUP_MAX_IDSCORE_ID,
+                "--group-max-idscore",
+                "em: a grouped read takes its group's assignment only if its own idScore is at or below this",
+                "em: with --read-groupings 1, a read in a group whose own Metabuli idScore (that of its best candidate; "
+                "0 without one) is at or below this value is labelled with the group's EM assignment. A read above it "
+                "keeps the per-read EM reclassification it would get without grouping. The EM itself still pools every "
+                "member, so confident reads keep informing their group. 1 gives every grouped read the group's "
+                "assignment. Default: 0.2",
+                typeid(float),
+                (void *) &groupMaxIdScore,
+                "^(0(\\.[0-9]+)?|1(\\.0+)?)$"),
         TARGET_TAX_ID(TARGET_TAX_ID_ID,
                "--tax-id",
                "Tax. ID of clade. -1 for unclassified reads",
@@ -568,10 +595,24 @@ LocalParameters::LocalParameters() :
         WEIGHT_MODE(WEIGHT_MODE_ID,
                     "--weight-mode",
                     "Majority LCA weight mode.",
-                    "Majority LCA weight mode. 0:uniform, 1:score, 2:score squared",
+                    "How a group's members are weighted when its label is decided. 0:uniform, 1:score, 2:score squared. It does not decide who the label is written to -- that is always the members with no label of their own, or one scoring below --min-vote-score",
                     typeid(int),
                     (void *) &weightMode,
                     "[0-2]"),
+        KRAKEN2_FORMAT(KRAKEN2_FORMAT_ID,
+                  "--kraken2",
+                  "Read --score-col as Kraken2's LCA mapping and score it.",
+                  "Kraken2 writes no score, but its fifth output field is the LCA mapping:\n"
+                  "              space separated taxon:count pairs, 'A' for k-mers holding an\n"
+                  "              ambiguous nucleotide and '0' for k-mers queried without a hit,\n"
+                  "              with '|:|' between the mates of a pair. With this flag the column\n"
+                  "              named by --score-col is read that way and each read is scored as\n"
+                  "              Kraken2's confidence: the k-mers mapped to the clade rooted at the\n"
+                  "              assigned taxon, over the k-mers actually queried, which is every\n"
+                  "              count except 'A'. That makes --weight-mode 1 usable on Kraken2.",
+                  typeid(bool),
+                  (void *) &kraken2Format,
+                  ""),
         MAX_KMER_READS(MAX_KMER_READS_ID,
                 "--max-kmer-reads",
                 "Skip k-mers shared by more than this many reads (0=disabled)",
@@ -616,6 +657,17 @@ LocalParameters::LocalParameters() :
                 "reproduce old runs. Default: 16",
                 typeid(int),
                 (void *) &partitions,
+                "^[0-9]+$"),
+        MAX_BUFFERED_PAIRS(MAX_BUFFERED_PAIRS_ID,
+                "--max-buffered-pairs",
+                "Pairs the emit stage holds before it flushes (0=derive from --max-ram)",
+                "How many read pairs the emit stage may hold across all threads before it writes a flush "
+                "round to disk. 0 derives it from --max-ram, which is what a real run wants. A number sets it "
+                "outright, only to make a small input take the many-round path. It cannot change the answer: "
+                "weights accumulate by saturating addition, so the merge does not depend on the schedule. "
+                "Default: 0",
+                typeid(int),
+                (void *) &maxBufferedPairs,
                 "^[0-9]+$"),
         COMMON_KMER_SPAN(COMMON_KMER_SPAN_ID,
                 "--common-kmer-span",
@@ -952,9 +1004,12 @@ LocalParameters::LocalParameters() :
     minReads = 10;
     maxIter = 1000;
     tol = 1e-6;
+    emScoreMode = 1;
+    emLambda = 0.1;
     scorePower = 3.0;
     readGroupings = 0;
     groupWeight = 1;
+    groupMaxIdScore = 0.2f;
     commonKmerDb = "";
     // read grouping (GroupGenerator); setGroupGenerationDefaults() re-applies the same values
     maxKmerReads = 0;
@@ -962,6 +1017,7 @@ LocalParameters::LocalParameters() :
     minOverlapRatio = 0.5f;
     weakBandRatio = 0.3333f;
     partitions = 16;
+    maxBufferedPairs = 0;
     edgeMode = 0;
     commonKmerSpan = 0;
     maxTmpDiskMiB = 0;
@@ -1004,6 +1060,7 @@ LocalParameters::LocalParameters() :
     readIdCol = 0;
     taxidCol = 0;
     scoreCol = 0;
+    kraken2Format = false;
     cladeRank = "";
     skipSecondary = 0;
 
@@ -1202,6 +1259,8 @@ LocalParameters::LocalParameters() :
     // M-step prior
     emAlgorithm.push_back(&PRIOR_MASS);
     // likelihood weight shape
+    emAlgorithm.push_back(&EM_SCORE_MODE);
+    emAlgorithm.push_back(&EM_LAMBDA);
     emAlgorithm.push_back(&SCORE_POWER);
     // iteration control
     emAlgorithm.push_back(&MAX_ITER);
@@ -1212,6 +1271,7 @@ LocalParameters::LocalParameters() :
     // read grouping
     emAlgorithm.push_back(&READ_GROUPINGS);
     emAlgorithm.push_back(&GROUP_WEIGHT);
+    emAlgorithm.push_back(&GROUP_MAX_IDSCORE);
     // built-in grouping inputs (used when --group-dir is not given); the grouping itself runs
     // with the `grouping` command's defaults -- tune it there, not here
     emAlgorithm.push_back(&QUERY_FILE);
@@ -1248,6 +1308,7 @@ LocalParameters::LocalParameters() :
     groupGeneration.push_back(&MIN_OVERLAP_RATIO);
     groupGeneration.push_back(&WEAK_BAND_RATIO);
     groupGeneration.push_back(&PARTITIONS);
+    groupGeneration.push_back(&MAX_BUFFERED_PAIRS);
     groupGeneration.push_back(&COMMON_KMER_SPAN);
     groupGeneration.push_back(&MAX_TMP_DISK);
     groupGeneration.push_back(&PRINT_LOG);
@@ -1265,6 +1326,7 @@ LocalParameters::LocalParameters() :
     groupApplication.push_back(&READID_COL);
     groupApplication.push_back(&TAXID_COL);
     groupApplication.push_back(&WEIGHT_MODE);
+    groupApplication.push_back(&KRAKEN2_FORMAT);
 
     // filter 
     filter.push_back(&PARAM_THREADS);

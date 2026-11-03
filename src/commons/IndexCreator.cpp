@@ -113,7 +113,27 @@ IndexCreator::IndexCreator(
     const LocalParameters & par, 
     int kmerFormat) : par(par), kmerFormat(kmerFormat) 
 {
+    // This is the constructor that reaches the format-aware KmerExtractor (--kmer-format 5 gives
+    // 12-mer syncmers; the taxonomy-taking one is fixed to 8-mer metamers). createCommonKmerIndex
+    // reads the same paths as with that constructor, so they are set here too.
     dbDir = par.filenames[0];
+    if (par.filenames.size() >= 2) {
+        fnaListFileName = par.filenames[1];
+    }
+    if (par.filenames.size() >= 3) {
+        acc2taxidFileName = par.filenames[2];
+    }
+
+    taxidListFileName = dbDir + "/taxID_list";
+    taxonomyBinaryFileName = dbDir + "/taxonomyDB";
+    versionFileName = dbDir + "/db.version";
+    paramterFileName = dbDir + "/db.parameters";
+
+    this->totalLength = par.dbTotalLength;
+
+    // No MetamerPattern here, so no dnaMask to take this from.
+    MARKER = ~ 0ULL;
+
     // if (par.reducedAA) {
     //     geneticCode = new ReducedGeneticCode();
     // } else {
@@ -124,6 +144,30 @@ IndexCreator::IndexCreator(
     subMat = new NucleotideMatrix(par.scoringMatrixFile.values.nucleotide().c_str(), 1.0, 0.0);
 }
 
+void IndexCreator::setTaxonomy(TaxonomyWrapper * taxonomy) {
+    this->taxonomy = taxonomy;
+    taxaNotToMask.clear();
+    taxaToSkipProdigal.clear();
+    if (taxonomy == nullptr) {
+        return;
+    }
+    if (!par.noMaskTaxa.empty()) {
+        for (const string &taxIdStr : Util::split(par.noMaskTaxa, ",")) {
+            taxaNotToMask.push_back(taxonomy->getInternalTaxID(stoi(taxIdStr)));
+        }
+    }
+    if (!par.skipProdigalTaxa.empty()) {
+        for (const string &taxIdStr : Util::split(par.skipProdigalTaxa, ",")) {
+            TaxID taxId = taxonomy->getInternalTaxID(stoi(taxIdStr));
+            if (taxId <= 0) { // getInternalTaxID returns -1 for a taxon absent from the taxonomy
+                cout << "Warning: --skip-prodigal-taxa taxon " << taxIdStr
+                     << " is not in the taxonomy; ignoring." << endl;
+                continue;
+            }
+            taxaToSkipProdigal.push_back(taxId);
+        }
+    }
+}
 
 IndexCreator::~IndexCreator() {
     delete metamerPattern;
@@ -301,11 +345,17 @@ void IndexCreator::createCommonKmerIndex() {
     }
 
     // Write taxonomy ID list
-    FILE * taxidListFile = fopen(taxidListFileName.c_str(), "w");
-    for (auto & taxid: taxIdSet) {
-        fprintf(taxidListFile, "%d\n", taxid);
+    // Sorted, not in taxIdSet's own order: the set is unordered and filled from several
+    // threads, so the same input wrote the same taxa in a different order every run.
+    {
+        std::vector<TaxID> sortedTaxIds(taxIdSet.begin(), taxIdSet.end());
+        std::sort(sortedTaxIds.begin(), sortedTaxIds.end());
+        FILE * taxidListFile = fopen(taxidListFileName.c_str(), "w");
+        for (const TaxID taxid : sortedTaxIds) {
+            fprintf(taxidListFile, "%d\n", taxid);
+        }
+        fclose(taxidListFile);
     }
-    fclose(taxidListFile);
 
     std::vector<std::atomic<bool>> batchChecker(accessionBatches.size());
     batchEstimateScale.assign(accessionBatches.size(), 1.0f);
@@ -322,7 +372,14 @@ void IndexCreator::createCommonKmerIndex() {
             fillTargetKmerBuffer(kmerBuffer, batchChecker, processedBatchCnt, par);
         }
         cout << double(time(nullptr) - start) << " s" << endl;
-        
+
+        // Whatever the reservations did, the sort may only touch what was allocated.
+        // Slots between the last write and this bound hold zeroed k-mers, which sort to
+        // the front and are skipped where the first meaningful k-mer is found.
+        if (kmerBuffer.startIndexOfReserve > kmerBuffer.bufferSize) {
+            kmerBuffer.startIndexOfReserve = kmerBuffer.bufferSize;
+        }
+
         // Sort the k-mers
         start = time(nullptr);
         cout << "Sort k-mers      : " << flush;
@@ -336,13 +393,11 @@ void IndexCreator::createCommonKmerIndex() {
         cout << "Filter k-mers    : " << time(nullptr) - start << " s" << endl; 
         cout << "Selected k-mers  : " << selectedKmerCnt << endl;
 
-        // Write the target files
+        // Write the target files. Always as a flush to be merged, never straight to the
+        // final index: what makes this a common k-mer list is mergeTargetFiles<COMMON_KMER>
+        // below, and writing the final files here would skip it.
         start = time(nullptr);
-        if(processedBatchCnt == accessionBatches.size() && numOfFlush == 0) {
-            writeTargetFilesAndSplits(kmerBuffer, uniqKmerIdx.buffer, selectedKmerCnt, uniqKmerIdxRanges);
-        } else {
-            writeTargetFiles(kmerBuffer, uniqKmerIdx.buffer, uniqKmerIdxRanges);
-        }
+        writeTargetFiles(kmerBuffer, uniqKmerIdx.buffer, uniqKmerIdxRanges);
         cout << "Write k-mers     : " << time(nullptr) - start << " s" << endl;
 
         // Reset buffers
@@ -355,11 +410,10 @@ void IndexCreator::createCommonKmerIndex() {
 
     taxonomy->writeTaxonomyDB(par.filenames[0] + "/taxonomyDB");
     writeDbParameters();
-    
-    if (numOfFlush == 1) {
-        cout << "Index creation completed." << endl;
-        return;
-    }
+
+    // No early return for a single flush. The k-mers that occur in more than one species
+    // are chosen in the merge, so returning before it left every k-mer in the list: an input
+    // that fit one buffer produced a full index under the name of a common k-mer list.
     cout << "Merge reference DB files ... " << endl;
 
     // for (int i = 0; i < 243; i++) {
@@ -857,18 +911,29 @@ void IndexCreator::getTaxonomyOfAccessions(vector<Accession> & observedAccession
     } else {
         acc2taxidFile = fopen(mappingFileName.c_str(), "w");
     }
+    // Rows sorted by accession: both sources are filled from several threads, so the same
+    // input wrote the same rows in a different order every run. Only the file is sorted;
+    // observedAccessionsVec keeps its order for the batching below.
     if (par.accessionLevel == 1) {
-        for (auto & acc2taxid: acc2accId) {
+        vector<pair<string, pair<TaxID, TaxID>>> rows(acc2accId.begin(), acc2accId.end());
+        sort(rows.begin(), rows.end());
+        for (auto & acc2taxid: rows) {
             fprintf(acc2taxidFile, "%s\t%d\t%d\n", acc2taxid.first.c_str(), acc2taxid.second.first, acc2taxid.second.second);
         }
     } else {
+        vector<pair<string, TaxID>> rows;
+        rows.reserve(observedAccessionsVec.size());
         for (size_t i = 0; i < observedAccessionsVec.size(); ++i) {
             if (observedAccessionsVec[i].taxID == 0) {
                 continue;
             }
-            fprintf(acc2taxidFile, "%s\t%d\n", observedAccessionsVec[i].accession.c_str(), taxonomy->getOriginalTaxID(observedAccessionsVec[i].taxID));
-        }        
-    }   
+            rows.emplace_back(observedAccessionsVec[i].accession, taxonomy->getOriginalTaxID(observedAccessionsVec[i].taxID));
+        }
+        sort(rows.begin(), rows.end());
+        for (const auto & row : rows) {
+            fprintf(acc2taxidFile, "%s\t%d\n", row.first.c_str(), row.second);
+        }
+    }
 
     if (unmappedAccessions.empty()) {
         cout << "All accessions are mapped to taxonomy" << endl;
@@ -1398,7 +1463,7 @@ bool IndexCreator::extractKmerFromSixFrames(
             const double estimateScale = batchEstimateScale[batchIdx];
             if (par.syncmer) {
                 estimatedKmerCnt = static_cast<size_t>(
-                    ((totalLength * 2.5) / ((12 - par.smerLen + 1) / 2.0)) * estimateScale
+                    ((totalLength * 2.5) / ((12 - par.smerLen + 1) / 4.0)) * estimateScale
                 );
             } else {
                 estimatedKmerCnt = static_cast<size_t>(
@@ -1499,7 +1564,8 @@ bool IndexCreator::extractKmerFromSixFrames(
             } else {
                 batchChecker[batchIdx].store(false, std::memory_order_release);
                 hasOverflow.fetch_add(1, std::memory_order_relaxed);
-                __sync_fetch_and_sub(&kmerBuffer.startIndexOfReserve, estimatedKmerCnt);
+                __sync_bool_compare_and_swap(&kmerBuffer.startIndexOfReserve,
+                                             posToWrite + estimatedKmerCnt, posToWrite);
             }
         }
     }

@@ -335,7 +335,16 @@ std::pair<char*, size_t> TaxonomyWrapper::serialize(const TaxonomyWrapper& t) {
     memcpy(p, &t.maxTaxID, sizeof(int));
     p += sizeof(int);
     
-    memcpy(p, t.taxonNodes, t.maxNodes * sizeof(TaxonNode));
+    memset(p, 0, t.maxNodes * sizeof(TaxonNode));
+    for (size_t i = 0; i < t.maxNodes; ++i) {
+        char * slot = p + i * sizeof(TaxonNode);
+        const TaxonNode & node = t.taxonNodes[i];
+        memcpy(slot + offsetof(TaxonNode, id),          &node.id,          sizeof(node.id));
+        memcpy(slot + offsetof(TaxonNode, taxId),       &node.taxId,       sizeof(node.taxId));
+        memcpy(slot + offsetof(TaxonNode, parentTaxId), &node.parentTaxId, sizeof(node.parentTaxId));
+        memcpy(slot + offsetof(TaxonNode, rankIdx),     &node.rankIdx,     sizeof(node.rankIdx));
+        memcpy(slot + offsetof(TaxonNode, nameIdx),     &node.nameIdx,     sizeof(node.nameIdx));
+    }
     p += t.maxNodes * sizeof(TaxonNode);
     memcpy(p, t.D, (t.maxTaxID + 1) * sizeof(int));
     p += (t.maxTaxID + 1) * sizeof(int);

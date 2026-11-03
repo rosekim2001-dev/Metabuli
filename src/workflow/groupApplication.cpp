@@ -11,7 +11,7 @@ void setGroupApplicationDefaults(LocalParameters & par){
     par.readIdCol = 2;
     par.taxidCol = 3;
     par.weightMode = 1; // 0: uniform, 1: score, 2: score^2
-    par.minVoteScr = 0.15;
+    par.minVoteScr = 0.0;
 }
 
 int groupApplication(int argc, const char **argv, const Command& command)

@@ -7,31 +7,14 @@
 #include <string>
 
 void setGroupGenerationDefaults(LocalParameters & par){
-    // The reads-per-k-mer cap, chosen from the sample rather than fixed. A k-mer shared by m reads
-    // contributes C(m,2) edges, so the frequency tail decides the edge volume, and the tail is not
-    // the same shape on two datasets: at this quantile the cap resolves to 63 on species-inclusion,
-    // 127 on species-exclusion and 255 on CAMI2 strain-madness. An absolute default cannot be
-    // right on all three. maxKmerReads is the absolute form and stays available, but it is off by
-    // default: an explicit cap wins over the quantile, so leaving it set would make the quantile dead.
+
     par.maxKmerReads = 0;
     par.maxKmerQuantile = 0.995f;
 
-    // Phase 1 core threshold as a fraction of k-mers per read. 0.5 was chosen for purity on CAMI2
-    // strain-madness (purity 0.953 at 0.5 against 0.670 at 0.3); species-exclusion is 0.999 pure
-    // at every value, so the default follows the harder case.
     par.minOverlapRatio = 0.5f;
-    // Weak-band lower bound as a fraction of the core threshold, also Phase 3's floor.
-    // 5/15 = 0.3333 reproduces the species-inclusion operating point, where the band was (5, 15].
     par.weakBandRatio = 0.3333f;
-    // Intermediate partitions. 16 is the value the published numbers were produced at, and it is
-    // a constant on purpose: 0 makes the routing follow --threads, so the same input on a machine
-    // with a different core count would be split differently.
     par.partitions = 16;
-    // K-mers discarded either side of a common-k-mer hit. 0 discards the hit alone; on CAMI2
-    // strain-madness, 1 -> 0 took species Recall*c from 0.164 to 0.245 for 0.010 of purity.
     par.commonKmerSpan = 0;
-    // Peak disk the subGraph_* intermediates may hold at once. 0 derives it from the free space
-    // at the output directory (80%).
     par.maxTmpDiskMiB = 0;
     par.edgeMode = 0;
     par.syncmer = 1;
@@ -87,11 +70,19 @@ bool prepareGroupGeneration(LocalParameters & par, const std::string & commonKme
     }
 
     // The query k-mers have to be built the same way as the common k-mer DB, or the two k-mer
-    // spaces do not line up and the common-k-mer filter silently removes nothing. DBs built
-    // before this record existed cannot be checked and pass silently.
+    // spaces do not line up and the common-k-mer filter silently removes nothing. A missing record
+    // is an error: skipping the check is how a list in the wrong k-mer space ran to completion.
     const std::string paramFile = commonKmerDb + "/kmer_params";
-    if (FileUtil::fileExists(paramFile.c_str())) {
-        int dbSyncmer = -1, dbSmerLen = -1, dbKmerFormat = -1;
+    if (!FileUtil::fileExists(paramFile.c_str())) {
+        error = "no kmer_params in the common k-mer DB at " + commonKmerDb + ".\n"
+                "       Without it the DB's k-mer settings cannot be checked against this run's,\n"
+                "       and a mismatch removes no k-mer at all while reporting success.\n"
+                "       Rebuild the list with create-common-kmer-list, and copy kmer_params\n"
+                "       along with diffIdx, info, split and taxID_list.";
+        return false;
+    }
+    int dbSyncmer = -1, dbSmerLen = -1, dbKmerFormat = -1, dbKmerLen = -1;
+    {
         std::ifstream in(paramFile);
         std::string key;
         int value = 0;
@@ -99,26 +90,32 @@ bool prepareGroupGeneration(LocalParameters & par, const std::string & commonKme
             if (key == "syncmer") { dbSyncmer = value; }
             else if (key == "smer_len") { dbSmerLen = value; }
             else if (key == "kmer_format") { dbKmerFormat = value; }
+            else if (key == "kmer_len") { dbKmerLen = value; }
         }
-        if (adoptDbKmerSettings) {
-            // The DB decides how the query k-mers are built.
-            if (dbSyncmer >= 0) { par.syncmer = dbSyncmer; }
-            if (dbSmerLen > 0) { par.smerLen = dbSmerLen; }
-            par.kmerFormat = (par.syncmer == 0) ? 3 : 5;
-            if (dbKmerFormat >= 0 && dbKmerFormat != par.kmerFormat) {
-                error = "common k-mer DB " + commonKmerDb + " records k-mer format " + std::to_string(dbKmerFormat)
-                        + ", which the read grouping cannot use (it needs 3 or 5).";
-                return false;
-            }
-        } else if (dbSyncmer != par.syncmer || dbSmerLen != par.smerLen || dbKmerFormat != par.kmerFormat) {
-            error = "k-mer settings do not match the common k-mer DB at " + commonKmerDb + ".\n"
-                    "       DB:      --syncmer " + std::to_string(dbSyncmer) + " --smer-len " + std::to_string(dbSmerLen)
-                    + " (k-mer format " + std::to_string(dbKmerFormat) + ")\n"
-                    "       Request: --syncmer " + std::to_string(par.syncmer) + " --smer-len " + std::to_string(par.smerLen)
-                    + " (k-mer format " + std::to_string(par.kmerFormat) + ")\n"
-                    "       Rebuild the DB with these settings, or pass the DB's settings.";
+    }
+    if (adoptDbKmerSettings) {
+        // The DB decides how the query k-mers are built.
+        if (dbSyncmer >= 0) { par.syncmer = dbSyncmer; }
+        if (dbSmerLen > 0) { par.smerLen = dbSmerLen; }
+        par.kmerFormat = (par.syncmer == 0) ? 3 : 5;
+        if (dbKmerFormat >= 0 && dbKmerFormat != par.kmerFormat) {
+            error = "common k-mer DB " + commonKmerDb + " records k-mer format " + std::to_string(dbKmerFormat)
+                    + ", which the read grouping cannot use (it needs 3 or 5).";
             return false;
         }
+    }
+    // The grouping extracts 12-mers in both of its formats. kmer_len is what the DB's extractor
+    // reported, so a list built as 8-mer metamers is caught here; -1 means the file predates it.
+    const int kmerLen = 12;
+    if (dbSyncmer != par.syncmer || dbSmerLen != par.smerLen || dbKmerFormat != par.kmerFormat
+        || (dbKmerLen != -1 && dbKmerLen != kmerLen)) {
+        error = "k-mer settings do not match the common k-mer DB at " + commonKmerDb + ".\n"
+                "       DB:      --syncmer " + std::to_string(dbSyncmer) + " --smer-len " + std::to_string(dbSmerLen)
+                + " (k-mer format " + std::to_string(dbKmerFormat) + ", k " + std::to_string(dbKmerLen) + ")\n"
+                "       Request: --syncmer " + std::to_string(par.syncmer) + " --smer-len " + std::to_string(par.smerLen)
+                + " (k-mer format " + std::to_string(par.kmerFormat) + ", k " + std::to_string(kmerLen) + ")\n"
+                "       Rebuild the DB with these settings, or pass the DB's settings.";
+        return false;
     }
     return true;
 }

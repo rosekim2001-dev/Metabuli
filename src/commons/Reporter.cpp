@@ -370,8 +370,9 @@ void Reporter::writeReportFile(
     writeReport(fp, cladeCounts, taxon2avgScore, numOfQuery);
     fclose(fp);
 
-    // Write Krona chart
-    if (jobId.empty()) { return; }
+    // Write Krona chart. jobId is what the default names are built from, so without one there is
+    // nothing to write -- unless the caller named the default report's file itself, as apply-group does.
+    if (jobId.empty() && (kronaFileName.empty() || reportType != ReportType::Default)) { return; }
     
     FILE *kronaFile = nullptr;
 
@@ -417,8 +418,9 @@ void Reporter::writeReportFile(
     writeReport(fp, cladeCounts, numOfQuery);
     fclose(fp);
 
-    // Write Krona chart
-    if (jobId.empty()) { return; }
+    // Write Krona chart. jobId is what the default names are built from, so without one there is
+    // nothing to write -- unless the caller named the default report's file itself, as apply-group does.
+    if (jobId.empty() && (kronaFileName.empty() || reportType != ReportType::Default)) { return; }
     
     FILE *kronaFile = nullptr;
 
@@ -775,7 +777,7 @@ void Reporter::writeReportFile(
     fclose(fp);
 
     // Write Krona chart (Krona HTML structure left unmodified to prevent rendering breaks)
-    if (jobId.empty()) { return; }
+    if (jobId.empty() && (kronaFileName.empty() || reportType != ReportType::Default)) { return; }
     
     FILE *kronaFile = nullptr;
 

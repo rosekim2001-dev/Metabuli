@@ -127,7 +127,11 @@ int accession2taxid(const std::string & assemblyList, const std::string & assacc
         EXIT(EXIT_FAILURE);
     }
     fprintf(handle, "accession\taccession.version\ttaxid\tgi\n");
-    for (auto & it : acc2taxid) {
+    // Sorted, not in acc2taxid's own order: the map is unordered and merged from several
+    // threads, so the same input wrote the same rows in a different order every run.
+    vector<pair<string, int>> sorted(acc2taxid.begin(), acc2taxid.end());
+    sort(sorted.begin(), sorted.end());
+    for (auto & it : sorted) {
         string accession = it.first;
         size_t pos = accession.find('.');
         if (pos != string::npos) { accession = accession.substr(0, pos);}

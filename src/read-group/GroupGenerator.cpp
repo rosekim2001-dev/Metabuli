@@ -666,7 +666,10 @@ void GroupGenerator::makeSubGraph(size_t processedReadCnt) {
     // own map -- concurrent writes to one map would need a lock on the hot path -- but the
     // decision to flush is made against the running total, so the number of flushes depends on
     // how much data there is and not on how many workers are chewing through it.
-    const size_t RELATION_BUDGET = getRelationBudget(par.ramUsage);
+    // --max-buffered-pairs overrides the derived budget. Flush trigger only.
+    const size_t RELATION_BUDGET = par.maxBufferedPairs > 0
+        ? static_cast<size_t>(par.maxBufferedPairs)
+        : getRelationBudget(par.ramUsage);
     std::atomic<size_t> bufferedPairs(0);
 
     // Emit buffers, one per output unit and shared by every thread. This is the whole point of
@@ -1050,7 +1053,11 @@ void GroupGenerator::makeSubGraph(size_t processedReadCnt) {
         // taking it inside the C(m,2) loop below, once per occurrence. The sub-batch is the
         // whole batch divided by the shard count, so what a thread stages in total does not
         // grow with the striping.
-        const size_t stageBatch = std::max<size_t>(1, EMIT_STAGE_BATCH / emitShardCnt);
+        // Also capped by one buffer's share of the budget: a batch larger than that holds more
+        // than the budget allows before any drain consults it.
+        const size_t stageBatch = std::max<size_t>(1,
+            std::min(EMIT_STAGE_BATCH / emitShardCnt,
+                     RELATION_BUDGET / std::max<size_t>(1, emitBufferCnt)));
         std::vector<std::vector<uint64_t>> stage(emitBufferCnt);
         for (size_t b = 0; b < emitBufferCnt; ++b) {
             stage[b].reserve(stageBatch);
@@ -1167,25 +1174,25 @@ void GroupGenerator::makeSubGraph(size_t processedReadCnt) {
                         }
                     }
                 }
-                return; // the clique loop below is the other branch of this choice
-            }
-            for (size_t i = 0; i + 1 < m; ++i) {
-                const uint32_t id1 = currentQueryIds[i];
-                const uint64_t idHi = static_cast<uint64_t>(id1) << 32;
-                for (size_t j = i + 1; j < m; ++j) {
-                    const uint32_t id2 = currentQueryIds[j];
-                    // Route at insertion time, not at write time. The unit a pair belongs to
-                    // is a function of (id1, id2) alone, so deciding it here changes nothing
-                    // about where the pair ends up -- it only moves the decision earlier, which
-                    // is what lets the buffer be held per unit.
-                    const size_t route = routeOf(id1, id2, partitionCnt, emitRangeSize);
-                    const size_t u = emitUnitIndex(
-                        route, shardOf(id1, shardsForRoute(route, partitionCnt)), partitionCnt);
-                    const uint64_t pairKey = idHi | static_cast<uint64_t>(id2);
-                    const size_t b = u * emitShardCnt + emitShardOf(pairKey, emitShardCnt);
-                    stage[b].push_back(pairKey);
-                    if (stage[b].size() >= stageBatch) {
-                        drainStage(b);
+            } else {
+                for (size_t i = 0; i + 1 < m; ++i) {
+                    const uint32_t id1 = currentQueryIds[i];
+                    const uint64_t idHi = static_cast<uint64_t>(id1) << 32;
+                    for (size_t j = i + 1; j < m; ++j) {
+                        const uint32_t id2 = currentQueryIds[j];
+                        // Route at insertion time, not at write time. The unit a pair belongs to
+                        // is a function of (id1, id2) alone, so deciding it here changes nothing
+                        // about where the pair ends up -- it only moves the decision earlier, which
+                        // is what lets the buffer be held per unit.
+                        const size_t route = routeOf(id1, id2, partitionCnt, emitRangeSize);
+                        const size_t u = emitUnitIndex(
+                            route, shardOf(id1, shardsForRoute(route, partitionCnt)), partitionCnt);
+                        const uint64_t pairKey = idHi | static_cast<uint64_t>(id2);
+                        const size_t b = u * emitShardCnt + emitShardOf(pairKey, emitShardCnt);
+                        stage[b].push_back(pairKey);
+                        if (stage[b].size() >= stageBatch) {
+                            drainStage(b);
+                        }
                     }
                 }
             }

@@ -12,6 +12,11 @@
 
 #include <queue>
 #include <mutex>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <sys/sysinfo.h>
 #include <condition_variable>
 #include <cmath>
 
@@ -175,6 +180,27 @@ struct ProteinQuery {
 
 };
 
+// What the machine will actually give, as opposed to what --max-ram declares.
+inline size_t availableMemoryBytes() {
+#if defined(__linux__)
+    // Line by line: not every /proc/meminfo row carries a unit, so streaming with >> would
+    // read the next row's key as this row's unit.
+    std::ifstream meminfo("/proc/meminfo");
+    std::string line;
+    while (std::getline(meminfo, line)) {
+        unsigned long long kb = 0;
+        if (sscanf(line.c_str(), "MemAvailable: %llu kB", &kb) == 1) {
+            return static_cast<size_t>(kb) * 1024;
+        }
+    }
+    struct sysinfo info;
+    sysinfo(&info);
+    return (size_t)(info.freeram + info.bufferram) * info.mem_unit;
+#else
+    return 8ULL * 1024 * 1024 * 1024;
+#endif
+}
+
 template<typename T>
 struct Buffer {
     T *buffer;
@@ -183,6 +209,11 @@ struct Buffer {
 
     explicit Buffer(size_t sizeOfBuffer=100) {
         buffer = (T *) calloc(sizeOfBuffer, sizeof(T));
+        if (buffer == nullptr) {
+            std::cerr << "Could not allocate " << sizeOfBuffer * sizeof(T)
+                      << " bytes for the k-mer buffer. Lower --max-ram." << std::endl;
+            EXIT(EXIT_FAILURE);
+        }
         bufferSize = sizeOfBuffer;
         startIndexOfReserve = 0;
     };
@@ -198,7 +229,13 @@ struct Buffer {
     };
 
     void reallocateMemory(size_t sizeOfBuffer) {
-        buffer = (T *) realloc(buffer, sizeof(T) * sizeOfBuffer);
+        T * grown = (T *) realloc(buffer, sizeof(T) * sizeOfBuffer);
+        if (grown == nullptr) {
+            std::cerr << "Could not grow the k-mer buffer to " << sizeOfBuffer * sizeof(T)
+                      << " bytes. Lower --max-ram." << std::endl;
+            EXIT(EXIT_FAILURE);
+        }
+        buffer = grown;
         bufferSize = sizeOfBuffer;
     };
 

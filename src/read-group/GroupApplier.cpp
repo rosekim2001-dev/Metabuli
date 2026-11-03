@@ -1,7 +1,9 @@
 #include "GroupApplier.h"
 #include "FileUtil.h"
 #include "common.h"
+#include "Reporter.h"
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -28,6 +30,7 @@ GroupApplier::GroupApplier(LocalParameters & par) : par(par) {
                     true);
 
     updatedResultFileName = outDir + "/updated_classifications.tsv";
+    updatedReportFileName = outDir + "/updated_report.tsv";
 }
 
 GroupApplier::~GroupApplier() {
@@ -66,6 +69,53 @@ void GroupApplier::startGroupApplication(const LocalParameters &par) {
 }
 
 
+// Kraken2's confidence, from the LCA mapping it writes in place of a score.
+//
+// The field is space separated taxon:count pairs, with 'A' for k-mers holding an ambiguous
+// nucleotide, '0' for k-mers that were queried and matched nothing, and '|:|' between the
+// mates of a pair. Q is every count except 'A', since those k-mers were never queried; N is
+// the counts whose taxon lies in the clade rooted at the assigned one, which is what makes a
+// read assigned to a genus score on its species' hits as well. Taxon ids here are the ones
+// Kraken2 wrote, so `taxonomy` is asked about them through their internal ids.
+static float kraken2Confidence(const std::string & mapping,
+                               TaxID assigned,
+                               TaxonomyWrapper * taxonomy,
+                               std::unordered_map<int, int> & external2internalTaxId) {
+    const auto assignedIt = external2internalTaxId.find(assigned);
+    const TaxID assignedInternal = (assignedIt == external2internalTaxId.end()) ? 0 : assignedIt->second;
+    uint64_t queried = 0;
+    uint64_t inClade = 0;
+    size_t i = 0;
+    const size_t n = mapping.size();
+    while (i < n) {
+        while (i < n && mapping[i] == ' ') { i++; }
+        size_t end = i;
+        while (end < n && mapping[end] != ' ') { end++; }
+        if (end == i) { break; }
+        const size_t colon = mapping.rfind(':', end - 1);
+        if (colon == std::string::npos || colon < i) { i = end; continue; }
+        const std::string key = mapping.substr(i, colon - i);
+        const uint64_t count = strtoull(mapping.c_str() + colon + 1, nullptr, 10);
+        i = end;
+        if (key.empty() || key == "|") { continue; }   // the |:| that separates the mates
+        if (key == "A") { continue; }                  // ambiguous: never queried
+        queried += count;
+        if (key == "0") { continue; }                  // queried, no hit
+        const TaxID hit = static_cast<TaxID>(strtol(key.c_str(), nullptr, 10));
+        if (hit == assigned) {
+            inClade += count;
+        } else if (assignedInternal != 0) {
+            auto hitIt = external2internalTaxId.find(hit);
+            if (hitIt != external2internalTaxId.end()
+                && taxonomy->IsAncestor(assignedInternal, hitIt->second)) {
+                inClade += count;
+            }
+        }
+    }
+    if (queried == 0) { return 0.0f; }
+    return static_cast<float>(inClade) / static_cast<float>(queried);
+}
+
 void GroupApplier::loadOrgResult(vector<OrgResult>& orgResults, size_t& processedReadCnt) {
     std::ifstream inFile(orgRes);
     if (!inFile.is_open()) {
@@ -79,6 +129,12 @@ void GroupApplier::loadOrgResult(vector<OrgResult>& orgResults, size_t& processe
     // Metabuli's read-by-read result keeps the query length in the 4th column.
     const int lengthCol = 3;
     const bool useScore = !(par.weightMode == 0 || scoreCol < 0);
+    std::unordered_map<int, int> external2internalTaxId;
+    if (useScore && par.kraken2Format) {
+        taxonomy->getExternal2internalTaxID(external2internalTaxId);
+    }
+    size_t emptyMappings = 0;
+    size_t unreadableScores = 0;
     string line;
     while (getline(inFile, line)) {
         if (line.empty()) continue;
@@ -86,13 +142,36 @@ void GroupApplier::loadOrgResult(vector<OrgResult>& orgResults, size_t& processe
         std::vector<std::string> columns = TaxonomyWrapper::splitByDelimiter(line, "\t", 20);
         OrgResult result;
         result.label = stoi(columns[classificationCol]);
-        result.score = useScore ? stof(columns[scoreCol]) : 1.0f;
+        result.score = 1.0f;
+        if (useScore && par.kraken2Format) {
+            result.score = kraken2Confidence(columns[scoreCol], result.label, taxonomy, external2internalTaxId);
+            if (result.score == 0.0f) { emptyMappings++; }
+        } else if (useScore) {
+            // Not every classifier writes a score. Kraken2's fifth column is its LCA mapping, which
+            // begins with an 'A' -- its marker for ambiguous k-mers -- often enough that stof threw
+            // part way through a file. A read whose score cannot be read scores 0.
+            const char * scoreStr = columns[scoreCol].c_str();
+            char * scoreEnd = nullptr;
+            result.score = strtof(scoreStr, &scoreEnd);
+            if (scoreEnd == scoreStr) {
+                result.score = 0.0f;
+                unreadableScores++;
+            }
+        }
         result.queryLength = (static_cast<int>(columns.size()) > lengthCol) ? atoi(columns[lengthCol].c_str()) : 0;
         result.name = columns[readNameCol];
         orgResults.push_back(std::move(result));
         processedReadCnt++;
     }
     inFile.close();
+    if (emptyMappings > 0) {
+        cout << "Note: " << emptyMappings << " reads scored 0 from column " << (scoreCol + 1)
+             << ", which is every unclassified read and any whose k-mers were all ambiguous." << endl;
+    }
+    if (unreadableScores > 0) {
+        cout << "Warning: column " << (scoreCol + 1) << " held no number on "
+             << unreadableScores << " lines; those reads scored 0." << endl;
+    }
     cout << "Original Metabuli result loaded from " << orgRes << " successfully." << endl;
     cout << "Number of query result: " << orgResults.size() << endl;
 }
@@ -219,6 +298,7 @@ void GroupApplier::applyRepLabel(const vector<OrgResult>& orgResults,
     out << "\ttaxID:match_count\n";
 
     size_t relabeled = 0;
+    std::unordered_map<TaxID, unsigned int> taxCounts;
     for (size_t queryIdx = 0; queryIdx < orgResults.size(); queryIdx++) {
         const OrgResult &org = orgResults[queryIdx];
         const uint32_t groupId = groupMappingInfo[queryIdx];
@@ -228,8 +308,10 @@ void GroupApplier::applyRepLabel(const vector<OrgResult>& orgResults,
         // Internal taxonomy id of the label this read ends up with; 0 = unclassified.
         int label = 0;
         if (hasRepLabel) {
-            const bool applyRep = (par.weightMode == 0)
-                || (org.label == 0 || org.score < par.minVoteScr);
+            // --weight-mode only says how members are weighted when the group label is decided.
+            // In every mode a member keeps its own label unless it has none or scores below the
+            // vote threshold;
+            const bool applyRep = (org.label == 0 || org.score < par.minVoteScr);
             if (applyRep) {
                 label = static_cast<int>(repLabelIt->second);
                 ++relabeled;
@@ -240,6 +322,7 @@ void GroupApplier::applyRepLabel(const vector<OrgResult>& orgResults,
             label = external2internalTaxId[org.label];
         }
 
+        ++taxCounts[label];
         const string groupText = (groupId == 0) ? string("-") : std::to_string(groupId);
         if (label != 0) {
             const TaxonNode *node = taxonomy->taxonNode(label);
@@ -260,6 +343,13 @@ void GroupApplier::applyRepLabel(const vector<OrgResult>& orgResults,
         }
     }
     out.close();
+
+    // On data without an answer sheet the report is the only thing to read. Reporter is given the
+    // file names explicitly: its own naming reads filenames[3] and [4] as classify lays them out.
+    Reporter reporter(par, taxonomy, updatedReportFileName);
+    reporter.writeReportFile(static_cast<int>(orgResults.size()), taxCounts, ReportType::Default,
+                             outDir + "/updated_krona.html");
+    cout << "Report saved to " << updatedReportFileName << endl;
 
     cout << "Reads relabeled with a group label: " << relabeled << "/" << orgResults.size() << endl;
     cout << "Result saved to " << updatedResultFileName << " successfully." << endl;

@@ -96,7 +96,30 @@ void addAverageScoresToMap(
 // A query is one read, or, with --read-groupings 1, one read group.
 struct Observation {
     uint32_t spIdx;   // index into CandidateSet::speciesList
-    float weight;     // score ^ --score-power
+    float weight;     // ScoreModel::weight of the query's score for the species
+};
+
+// Turns a candidate's score into the score part of its likelihood weight.
+//   --em-score-mode 0: idScore^p.
+//   --em-score-mode 1: exp(lambda * (S - S_best)), with S = idScore * read length.
+struct ScoreModel {
+    int mode;
+    double lambda;
+    double power;
+
+    explicit ScoreModel(const LocalParameters &par)
+        : mode(par.emScoreMode), lambda(par.emLambda), power(par.scorePower) {}
+
+    // The per-read score the weight is computed from: idScore, or S in mode 1.
+    double score(float idScore, uint32_t queryLength) const {
+        return mode == 0 ? static_cast<double>(idScore)
+                         : static_cast<double>(idScore) * static_cast<double>(queryLength);
+    }
+
+    // bestScore is the highest score() among the query's candidates.
+    double weight(double score, double bestScore) const {
+        return mode == 0 ? std::pow(score, power) : std::exp(lambda * (score - bestScore));
+    }
 };
 
 struct CandidateSet {
@@ -128,20 +151,24 @@ bool loadObservations(
     const LocalParameters &par,
     CandidateSet &cs)
 {
-    const double scorePower = par.scorePower;
+    const ScoreModel model(par);
     cs.queryOffsets.reserve(entryCount + 1);
     cs.queryOffsets.push_back(0);
 
     CandidateDBEntry entry;
     for (size_t i = 0; i < entryCount; ++i) {
         if (reader.getByIndex(i, entry, 0)) {
+            double best = 0.0;
+            for (const SpeciesCandidate &candidate : entry.candidates) {
+                best = std::max(best, model.score(candidate.idScore, entry.queryLength));
+            }
             for (const SpeciesCandidate &candidate : entry.candidates) {
                 auto inserted = cs.sp2idx.emplace(candidate.speciesId,
                                                   static_cast<uint32_t>(cs.speciesList.size()));
                 if (inserted.second) {
                     cs.speciesList.push_back(candidate.speciesId);
                 }
-                const double weight = std::pow(static_cast<double>(candidate.idScore), scorePower);
+                const double weight = model.weight(model.score(candidate.idScore, entry.queryLength), best);
                 Observation observation;
                 observation.spIdx = inserted.first->second;
                 observation.weight = static_cast<float>(weight);
@@ -344,15 +371,17 @@ struct GroupedQueries {
     std::vector<uint32_t> readQuery;           // candidate DB index -> EM query
     std::vector<uint32_t> queryReads;          // EM query -> reads it stands for (1 for a single read)
     std::vector<uint32_t> groupReadsWithCand;  // group query -> members with >= 1 candidate
+    std::vector<uint64_t> groupLength;         // group query -> summed length of its readable members
     std::vector<float> obsMeanScore;           // mean idScore of obs[0 .. queryOffsets[groupCount])
     size_t maxGroupReads = 0;
 };
 
 // Pools the candidates of every read group into one EM query. The score of a
-// group for a species is the sum of its members' idScores for that species divided
-// by the group's read count (members without candidates count in the divisor), and
-// the observation weight is that score ^ --score-power, exactly as for a single
-// read. Reads in no group become single-read queries after the group queries.
+// group for a species is the sum of its members' scores (ScoreModel::score) for
+// that species divided by the group's read count (members without candidates count
+// in the divisor), and the observation weight is ScoreModel::weight of that score
+// against the group's best, exactly as for a single read. Reads in no group become
+// single-read queries after the group queries.
 bool loadGroupedObservations(
     CandidateDBReader &reader,
     size_t entryCount,
@@ -361,7 +390,7 @@ bool loadGroupedObservations(
     CandidateSet &cs,
     GroupedQueries &gq)
 {
-    const double scorePower = par.scorePower;
+    const ScoreModel model(par);
 
     // Group ids -> compact query indices, ascending by group id.
     {
@@ -380,10 +409,11 @@ bool loadGroupedObservations(
     gq.readQuery.assign(entryCount, 0);
     gq.queryReads.assign(gq.groupCount, 0);
     gq.groupReadsWithCand.assign(gq.groupCount, 0);
+    gq.groupLength.assign(gq.groupCount, 0);
 
-    // Pass 1: every read's raw (species, idScore) pairs in candidate DB order, and
+    // Pass 1: every read's raw (species, score) pairs in candidate DB order, and
     // the EM query each read belongs to.
-    std::vector<Observation> raw;     // weight holds the raw idScore here
+    std::vector<Observation> raw;     // weight holds the raw ScoreModel::score here
     std::vector<uint32_t> rawOffsets;
     rawOffsets.reserve(entryCount + 1);
     rawOffsets.push_back(0);
@@ -414,6 +444,9 @@ bool loadGroupedObservations(
         gq.readQuery[i] = q;
 
         if (readable) {
+            if (q < gq.groupCount) {
+                gq.groupLength[q] += entry.queryLength;
+            }
             for (const SpeciesCandidate &candidate : entry.candidates) {
                 auto inserted = cs.sp2idx.emplace(candidate.speciesId,
                                                   static_cast<uint32_t>(cs.speciesList.size()));
@@ -422,7 +455,7 @@ bool loadGroupedObservations(
                 }
                 Observation observation;
                 observation.spIdx = inserted.first->second;
-                observation.weight = candidate.idScore;
+                observation.weight = static_cast<float>(model.score(candidate.idScore, entry.queryLength));
                 raw.push_back(observation);
             }
             if (!entry.candidates.empty()) {
@@ -473,7 +506,7 @@ bool loadGroupedObservations(
     rawOffsets.shrink_to_fit();
 
     // Pass 3: inside each query, merge the pairs of one species into its mean
-    // idScore over the query's reads. Sorting by species index first makes the
+    // score over the query's reads. Sorting by species index first makes the
     // merge a single sweep and the observation order canonical.
     std::vector<uint32_t> mergedLen(queryCount, 0);
 #ifdef OPENMP
@@ -497,14 +530,15 @@ bool loadGroupedObservations(
                 ++j;
             }
             pooled[w].spIdx = s;
-            pooled[w].weight = static_cast<float>(sum / reads);   // mean idScore, in [0, 1]
+            pooled[w].weight = static_cast<float>(sum / reads);   // mean score per read
             ++w;
         }
         mergedLen[q] = w - begin;
     }
 
-    // Pass 4: compact, and turn the mean scores into EM weights. The means of the
-    // group queries are kept for the group table.
+    // Pass 4: compact, and turn the mean scores into EM weights. The group table
+    // keeps each group's mean idScore per species; in mode 1 that is the summed
+    // match score over the members' summed length.
     cs.queryOffsets.assign(queryCount + 1, 0);
     gq.obsMeanScore.clear();
     size_t dst = 0;
@@ -512,13 +546,24 @@ bool loadGroupedObservations(
         cs.queryOffsets[q] = static_cast<uint32_t>(dst);
         const uint32_t begin = bucketOffsets[q];
         const uint32_t len = mergedLen[q];
+        double best = 0.0;
+        for (uint32_t k = 0; k < len; ++k) {
+            best = std::max(best, static_cast<double>(pooled[begin + k].weight));
+        }
         for (uint32_t k = 0; k < len; ++k) {
             const float mean = pooled[begin + k].weight;
             const uint32_t spIdx = pooled[begin + k].spIdx;
             pooled[dst].spIdx = spIdx;
-            pooled[dst].weight = static_cast<float>(std::pow(static_cast<double>(mean), scorePower));
+            pooled[dst].weight = static_cast<float>(model.weight(static_cast<double>(mean), best));
             if (q < gq.groupCount) {
-                gq.obsMeanScore.push_back(mean);
+                float meanIdScore = mean;
+                if (model.mode != 0) {
+                    meanIdScore = gq.groupLength[q] == 0
+                        ? 0.0f
+                        : static_cast<float>(static_cast<double>(mean) * gq.queryReads[q]
+                                             / static_cast<double>(gq.groupLength[q]));
+                }
+                gq.obsMeanScore.push_back(meanIdScore);
             }
             ++dst;
         }
@@ -596,9 +641,7 @@ bool loadGenomeSizes(
     return true;
 }
 
-// lengthFactor is the 1/L of P(read | species) = score^p / L: a read is one of the
-// ~L start positions of the species' genome, so a larger genome makes any given
-// read less likely and does not attract reads on size alone. L is the
+// lengthFactor is the 1/L of P(read | species) = score^p / L: L is the
 // representative genome size; needs <DB dir>/species2genomeSize.tsv.
 std::vector<double> buildLengthFactors(
     const std::string &dbDir,
@@ -941,7 +984,7 @@ void reclassifyRead(
     const std::unordered_map<TaxID, double> &lengthFactor,
     double minTheta,
     double cumulativeThreshold,
-    double scorePower,
+    const ScoreModel &model,
     TaxonomyWrapper *taxonomy,
     Query &query,
     std::vector<std::pair<TaxID, double>> &scratchScores,
@@ -957,6 +1000,11 @@ void reclassifyRead(
 
     scratchScores.clear();
     double denom = 0.0;
+    // The best is over every candidate, as in the EM, not only the ones kept here.
+    double best = 0.0;
+    for (const SpeciesCandidate &candidate : entry.candidates) {
+        best = std::max(best, model.score(candidate.idScore, entry.queryLength));
+    }
     for (const SpeciesCandidate &candidate : entry.candidates) {
         auto thetaIt = theta.find(candidate.speciesId);
         if (thetaIt == theta.end() || thetaIt->second < minTheta) {
@@ -964,7 +1012,7 @@ void reclassifyRead(
         }
         auto lfIt = lengthFactor.find(candidate.speciesId);
         const double lf = (lfIt == lengthFactor.end()) ? 1.0 : lfIt->second;
-        const double weight = std::pow(static_cast<double>(candidate.idScore), scorePower);
+        const double weight = model.weight(model.score(candidate.idScore, entry.queryLength), best);
         const double score = thetaIt->second * weight * lf;
         if (score <= 0.0) {
             continue;
@@ -1005,9 +1053,10 @@ struct QueryAssignments {
 };
 
 // Classifies every EM query (group or single read) from its pooled observations,
-// the grouped counterpart of reclassifyRead. Every member read then inherits the
-// result, which is the point of grouping: a read whose own candidates are
-// ambiguous, or absent, is labelled by the reads it overlaps with.
+// the grouped counterpart of reclassifyRead. A member read whose own idScore is at
+// or below --group-max-idscore then inherits the result, which is the point of
+// grouping: a read whose own candidates are weak, or absent, is labelled by the
+// reads it overlaps with. Members above it keep their per-read reclassification.
 void assignQueries(
     const CandidateSet &cs,
     const std::vector<double> &theta,
@@ -1063,6 +1112,17 @@ void assignQueries(
             std::copy(selected.begin(), selected.end(), qa.selected.begin() + begin);
         }
     }
+}
+
+// The read's own Metabuli idScore: that of its best candidate, which is what
+// classify-candidates reports for a read with one top species (tied tops report
+// their mean, at most this). 0 for a read without candidates.
+float ownIdScore(const CandidateDBEntry &entry) {
+    float best = 0.0f;
+    for (const SpeciesCandidate &candidate : entry.candidates) {
+        best = std::max(best, candidate.idScore);
+    }
+    return best;
 }
 
 // Fills one read's output row from its query's assignment. The taxon and score
@@ -1172,19 +1232,7 @@ void writeGroupTable(
 //   <out>_EM_report.tsv        taxonomy report over the raw EM abundances
 //   <out>_abundance.tsv        per-species EM abundance and length factor
 //   <out>_groups.tsv           (--read-groupings 1) per-group pooled scores and assignment
-//
-// The likelihood weight of assigning query q to species s is
-//   score(q,s)^p  *  theta(s)  *  lengthFactor(s)
-// where a query is a read, score its idScore, and lengthFactor(s) = 1 / the size of
-// the species' representative genome (species2genomeSize.tsv), so that
-// score^p * lengthFactor plays P(read | s). With --read-groupings 1 a query
-// is a read group and score(q,s) is the mean idScore of its reads for s (reads
-// without a candidate for s contribute 0); reads in no group stay single queries.
-// The M-step adds a uniform pseudocount:
-//   theta~(s) = sum_q mass(q) * posterior(q,s) + phi * R / S
-// with mass(q) = 1 for a read and the read count for a group (--group-weight 1),
-// R the summed mass of the queries with candidates.
-//
+
 // The groups live in <output directory>/grouping (groupMap, groups): em builds them there
 // by grouping the reads of --query-file against --common-kmer-db, or, without those two
 // flags, reuses what is already there (an earlier run, or a `metabuli grouping` result
@@ -1283,7 +1331,7 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
         std::cout << "Common k-mer DB       : " << par.commonKmerDb << std::endl;
         std::cout << "Grouping output       : " << groupingDir << std::endl;
         std::cout << "Grouping k-mers       : syncmer " << par.syncmer << ", s-mer length " << par.smerLen
-                  << " (from the DB's kmer_params when present)" << std::endl;
+                  << " (from the DB's kmer_params)" << std::endl;
         std::cout << "==================== read grouping ====================" << std::endl;
         const time_t groupingStart = time(nullptr);
         if (!runReadGrouping(par, groupingReadFiles, par.commonKmerDb, groupingDir)) {
@@ -1313,13 +1361,19 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
 
     std::cout << "Candidate DB          : " << candidateDb << std::endl;
     std::cout << "Candidate DB entries  : " << entryCount << std::endl;
-    std::cout << "Score power (p)       : " << par.scorePower << std::endl;
+    if (par.emScoreMode == 0) {
+        std::cout << "Score weight          : idScore^p, p = " << par.scorePower << std::endl;
+    } else {
+        std::cout << "Score weight          : exp(lambda * (S - S_best)), S = idScore * read length, lambda = "
+                  << par.emLambda << std::endl;
+    }
     std::cout << "Uniform prior (phi)   : " << par.priorMass << std::endl;
     std::cout << "Abundance exponent    : " << ABUNDANCE_EXPONENT << std::endl;
     std::cout << "SQUAREM               : on (step clamped to ["
               << SQUAREM_STEP_MIN << ", " << SQUAREM_STEP_MAX << "])" << std::endl;
     std::cout << "Read grouping         : " << (useGroups ? "on" : "off") << std::endl;
     if (useGroups) {
+        std::cout << "Group label applies to: grouped reads with idScore <= " << par.groupMaxIdScore << std::endl;
         std::cout << "Group weight          : "
                   << (par.groupWeight != 0 ? "read count of the group" : "1 per group") << std::endl;
     }
@@ -1430,7 +1484,10 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     std::unordered_map<TaxID, double> cladeScoreSums;
     size_t reclassifiedCnt = 0;
     size_t unreadableCnt = 0;
+    size_t groupLabelledCnt = 0;   // grouped reads that took their group's assignment
+    size_t groupKeptOwnCnt = 0;    // grouped reads above --group-max-idscore, classified on their own
 
+    const ScoreModel scoreModel(par);
     std::vector<Query> chunk;
     for (size_t chunkStart = 0; chunkStart < entryCount; chunkStart += OUTPUT_CHUNK) {
         const size_t chunkEnd = std::min(entryCount, chunkStart + OUTPUT_CHUNK);
@@ -1438,7 +1495,8 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
 
 #ifdef OPENMP
 #pragma omp parallel shared(reader, chunk, chunkStart, chunkEnd, thetaBySp, lengthFactorBySp, \
-        minTheta, taxonomy, par, useGroups, cs, gq, qa)
+        minTheta, taxonomy, par, scoreModel, useGroups, cs, gq, qa) \
+        reduction(+:groupLabelledCnt, groupKeptOwnCnt)
 #endif
         {
             int threadIdx = 0;
@@ -1455,11 +1513,23 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
                 if (!reader.getByIndex(i, entry, threadIdx)) {
                     continue;
                 }
-                if (useGroups) {
+                // A grouped read with a confident classification of its own keeps it; only the
+                // reads at or below --group-max-idscore are relabelled from their group. The
+                // single-read queries of ungrouped reads are their per-read result already.
+                const bool inGroup = useGroups && gq.readQuery[i] < gq.groupCount;
+                const bool takeGroup = inGroup && ownIdScore(entry) <= par.groupMaxIdScore;
+                if (inGroup) {
+                    if (takeGroup) {
+                        ++groupLabelledCnt;
+                    } else {
+                        ++groupKeptOwnCnt;
+                    }
+                }
+                if (useGroups && (!inGroup || takeGroup)) {
                     fillGroupedRead(entry, gq.readQuery[i], cs, qa, chunk[i - chunkStart]);
                 } else {
                     reclassifyRead(entry, thetaBySp, lengthFactorBySp, minTheta,
-                                   par.lcaPosterior, par.scorePower, taxonomy,
+                                   par.lcaPosterior, scoreModel, taxonomy,
                                    chunk[i - chunkStart], scratchScores, scratchSpecies);
                 }
             }
@@ -1484,6 +1554,10 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     }
     reporter.closeReadClassificationFile();
     std::cout << "Reads reclassified    : " << reclassifiedCnt << "/" << entryCount << std::endl;
+    if (useGroups) {
+        std::cout << "Grouped reads         : " << groupLabelledCnt << " took their group's assignment (idScore <= "
+                  << par.groupMaxIdScore << "), " << groupKeptOwnCnt << " kept their own" << std::endl;
+    }
     if (unreadableCnt > 0) {
         std::cout << "Warning: " << unreadableCnt
                   << " candidate DB entries could not be read and are absent from the output." << std::endl;

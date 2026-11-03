@@ -143,11 +143,14 @@ public:
     // Iteration control.
     PARAMETER(MAX_ITER)
     PARAMETER(TOL)
-    // Likelihood-weight shape: score^power * abundance * lengthFactor.
+    // Likelihood-weight shape: f(score) * abundance * lengthFactor.
+    PARAMETER(EM_SCORE_MODE)
+    PARAMETER(EM_LAMBDA)
     PARAMETER(SCORE_POWER)
     // Read grouping: pool each read group's candidates into one EM query.
     PARAMETER(READ_GROUPINGS)
     PARAMETER(GROUP_WEIGHT)
+    PARAMETER(GROUP_MAX_IDSCORE)
 
     // extract
     PARAMETER(TARGET_TAX_ID)
@@ -159,21 +162,25 @@ public:
     PARAMETER(MIN_VOTE_SCORE)
     PARAMETER(SCORE_COL)
     PARAMETER(WEIGHT_MODE)
+    PARAMETER(KRAKEN2_FORMAT)
     PARAMETER(MAX_KMER_READS)
     PARAMETER(MAX_KMER_QUANTILE)
     PARAMETER(MIN_OVERLAP_RATIO)
     PARAMETER(WEAK_BAND_RATIO)
     PARAMETER(PARTITIONS)
+    PARAMETER(MAX_BUFFERED_PAIRS)
     PARAMETER(COMMON_KMER_SPAN)
     PARAMETER(MAX_TMP_DISK)
     // em: common k-mer DB for the built-in read grouping
     PARAMETER(COMMON_KMER_DB)
     int weightMode;
+    bool kraken2Format;
     // Both thresholds are ratios so that one value means the same overlap across datasets
     // with different read lengths and syncmer density. commonKmerSpan counts k-mer
     // positions on a read, which is already the unit the read geometry gives it.
     float weakBandRatio;      // weak-band lower bound as a fraction of the core threshold
     int partitions;           // intermediate partitions; 0 = follow --threads (reproduction only)
+    int maxBufferedPairs;     // emit-stage flush trigger; 0 = derive it from --max-ram
     int edgeMode;             // 0 = clique C(m,2), 1 = center-star. Set by the command, not a flag
     int maxKmerReads;         // explicit reads-per-k-mer cap; 0 defers to maxKmerQuantile
     float maxKmerQuantile;    // share of k-mers (m >= 2) the cap keeps; picks maxKmerReads
@@ -310,9 +317,12 @@ public:
     int minReads;          // reclassify: drop species with theta * R below this
     int maxIter;           // hard iteration cap
     double tol;            // convergence tolerance on max|theta_new - theta_old|
-    double scorePower;     // exponent applied to the candidate idScore
+    int emScoreMode;       // 0: idScore^p, 1: exp(lambda * (S - S_best)) with S = idScore * read length
+    double emLambda;       // lambda of --em-score-mode 1, per nucleotide of match score
+    double scorePower;     // exponent applied to the candidate idScore (--em-score-mode 0)
     int readGroupings;     // 1: run the EM over read groups (<out dir>/grouping) instead of single reads
     int groupWeight;       // 1: a group carries its read count in the M-step, 0: every query counts once
+    float groupMaxIdScore; // grouped reads take the group's assignment only at or below this idScore
 
     // Extract
     int targetTaxId;

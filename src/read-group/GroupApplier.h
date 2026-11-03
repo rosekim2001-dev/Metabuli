@@ -2,8 +2,6 @@
 #define GROUP_APPLIER_H
 
 // apply-group: give every read of a group the group's representative taxonomy label.
-// Ported from the Metabuli_work fork; the output is written here directly instead of
-// through Reporter, whose grouped writer only exists in that fork.
 
 #include <unordered_map>
 #include <unordered_set>
@@ -33,6 +31,7 @@ protected:
 
     // Output
     std::string updatedResultFileName;
+    std::string updatedReportFileName;
 
 public:
     explicit GroupApplier(LocalParameters & par);

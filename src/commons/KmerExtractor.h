@@ -134,6 +134,8 @@ public:
         const MetamerPattern * metamerPattern);
 
     ~KmerExtractor();
+
+    int getKmerLen() const { return kmerLen; }
     
     void extractQueryKmers(
         Buffer<Kmer> &kmerBuffer,

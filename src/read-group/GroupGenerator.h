@@ -1324,8 +1324,8 @@ public:
 // Defaults of the `grouping` command. Call before parseParameters so that flags win.
 void setGroupGenerationDefaults(LocalParameters & par);
 
-// Derives the k-mer format from --syncmer and validates the grouping thresholds. When the common
-// k-mer DB records its k-mer settings (kmer_params), they are either adopted into par
+// Derives the k-mer format from --syncmer and validates the grouping thresholds. The common k-mer
+// DB must record its k-mer settings (kmer_params); they are either adopted into par
 // (adoptDbKmerSettings, for callers without --syncmer/--smer-len flags such as em) or checked
 // against par, failing on a mismatch. Returns false with a human-readable message in `error`.
 bool prepareGroupGeneration(LocalParameters & par, const std::string & commonKmerDb, std::string & error,

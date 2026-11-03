@@ -149,7 +149,7 @@ std::vector<Command> metabuliCommands = {
         {"em", emAlgorithm, &localPar.emAlgorithm, COMMAND_MAIN,
                 "Estimate species abundances from a candidate DB by EM and reclassify the reads, per read or per read group",
                 nullptr,
-                "YaeJi Kim <mermainkim1@naver.com>",
+                "YaeJi Kim <yeahedge01@snu.ac.kr>",
                 "<i:candidate DB> <i:database directory> <o:output directory> <job ID> ",
                 CITATION_SPACEPHARER,
                 {{"candidate DB", DbType::ACCESS_MODE_INPUT, DbType::NEED_DATA, &DbValidator::flatfile},

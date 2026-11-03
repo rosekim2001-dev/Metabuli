@@ -17,15 +17,18 @@ void setDefaults(LocalParameters & par){
     par.validateDb = 0;
     par.taxonomyPath = "" ;
     par.splitNum = 4096;
+    // Six-frame extraction. The ORF path (fillTargetKmerBuffer) needs a MetamerPattern, which the
+    // format-aware IndexCreator used below does not have.
+    par.cdsInfo = "x";
     par.maskProb = 0.9;
     par.maskMode = 0;
     par.accessionLevel = 0;
     time_t now = time(0);
     tm *ltm = localtime(&now);
     par.dbDate = to_string(1900 + ltm->tm_year) + "-" + to_string(1 + ltm->tm_mon) + "-" + to_string(ltm->tm_mday);
-    srand(time(NULL));
-    string randStr = to_string(rand());
-    par.dbName = randStr.substr(0, 32);
+    // Not rand(). The name went into db.parameters, so the same inputs wrote a different
+    // file every run, and nothing reads the field back except to round-trip it.
+    par.dbName = "common-kmer-list";
 }
 
 int create_common_kmer_list(int argc, const char **argv, const Command &command) {
@@ -33,6 +36,11 @@ int create_common_kmer_list(int argc, const char **argv, const Command &command)
     setDefaults(par);
     par.parseParameters(argc, argv, command, true, Parameters::PARSE_ALLOW_EMPTY, 0);
     const string & dbDir = par.filenames[0];
+    if (par.cdsInfo != "x") {
+        cerr << "Error: create-common-kmer-list extracts k-mers from six-frame translations only;" << endl;
+        cerr << "       --cds-info is not supported here." << endl;
+        return 1;
+    }
     const string taxonomyDir = par.filenames[3];
 
     #ifdef OPENMP
@@ -86,12 +94,18 @@ int create_common_kmer_list(int argc, const char **argv, const Command &command)
                             taxonomyDir + "/merged.dmp",
                             true);
 
-    IndexCreator idxCre(par, taxonomy, par.kmerFormat);
+    // Not the taxonomy-taking constructor: it builds its KmerExtractor from a MetamerPattern
+    // fixed at 8 amino acids and ignores kmerFormat, so --kmer-format 5 produced 8-mer
+    // metamers that grouping's 12-mer syncmers never matched.
+    IndexCreator idxCre(par, par.kmerFormat);
+    idxCre.setTaxonomy(taxonomy);
     idxCre.createCommonKmerIndex();
+    const int kmerLen = idxCre.getKmerLen();
 
     // Record how the k-mers were built. The grouping workflow compares its own --syncmer /
     // --smer-len against this and refuses to run on a mismatch: the two k-mer spaces would not
-    // line up and the common-k-mer filter would remove nothing, without any error.
+    // line up and the common-k-mer filter would remove nothing, without any error. kmer_len is
+    // what the extractor reported, not what was asked for.
     {
         const string paramFile = dbDir + "/kmer_params";
         ofstream out(paramFile);
@@ -101,7 +115,8 @@ int create_common_kmer_list(int argc, const char **argv, const Command &command)
         }
         out << "syncmer " << par.syncmer << "\n"
             << "smer_len " << par.smerLen << "\n"
-            << "kmer_format " << par.kmerFormat << "\n";
+            << "kmer_format " << par.kmerFormat << "\n"
+            << "kmer_len " << kmerLen << "\n";
         out.close();
     }
     delete taxonomy;
