@@ -475,10 +475,12 @@ LocalParameters::LocalParameters() :
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
         MIN_READS(MIN_READS_ID,
                 "--min-reads",
-                "em: min. expected read count for a species to survive reclassification",
-                "em: ignore species whose expected read count theta * R falls below this when reclassifying, where R is "
-                "the number of reads with candidates. Applied after EM, so the estimated abundances themselves are "
-                "unaffected. 0 keeps every species. Default: 10",
+                "em: min. reads a species must be the top species of; the others are removed with their reads",
+                "em: after EM, a species that is the top species (highest posterior) of fewer than this many reads is "
+                "removed together with those reads, which are left unclassified (deleted, not re-assigned to their "
+                "second-best species), as in mmseqs em-abundance. Repeated until every remaining species tops at least "
+                "this many reads. The EM abundances themselves (_EM_report.tsv) are unaffected. 0 keeps every species "
+                "and read. Default: 10",
                 typeid(int),
                 (void *) &minReads,
                 "^[0-9]+$"),

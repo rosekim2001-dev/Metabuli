@@ -978,18 +978,8 @@ bool resolvePosterior(
     return true;
 }
 
-void reclassifyRead(
-    const CandidateDBEntry &entry,
-    const std::unordered_map<TaxID, double> &theta,
-    const std::unordered_map<TaxID, double> &lengthFactor,
-    double minTheta,
-    double cumulativeThreshold,
-    const ScoreModel &model,
-    TaxonomyWrapper *taxonomy,
-    Query &query,
-    std::vector<std::pair<TaxID, double>> &scratchScores,
-    std::vector<TaxID> &scratchSpecies)
-{
+// An output row with the read's name and length and no classification.
+void unclassifiedRead(const CandidateDBEntry &entry, Query &query) {
     query.name = entry.queryName;
     query.queryLength = static_cast<int>(entry.queryLength);
     query.queryLength2 = 0;
@@ -997,6 +987,21 @@ void reclassifyRead(
     query.idScore = 0.0f;
     query.eValue = -1.0f;
     query.taxCnt.clear();
+}
+
+// theta holds the species that survived --min-reads only; the others are not candidates.
+void reclassifyRead(
+    const CandidateDBEntry &entry,
+    const std::unordered_map<TaxID, double> &theta,
+    const std::unordered_map<TaxID, double> &lengthFactor,
+    double cumulativeThreshold,
+    const ScoreModel &model,
+    TaxonomyWrapper *taxonomy,
+    Query &query,
+    std::vector<std::pair<TaxID, double>> &scratchScores,
+    std::vector<TaxID> &scratchSpecies)
+{
+    unclassifiedRead(entry, query);
 
     scratchScores.clear();
     double denom = 0.0;
@@ -1007,7 +1012,7 @@ void reclassifyRead(
     }
     for (const SpeciesCandidate &candidate : entry.candidates) {
         auto thetaIt = theta.find(candidate.speciesId);
-        if (thetaIt == theta.end() || thetaIt->second < minTheta) {
+        if (thetaIt == theta.end()) {
             continue;
         }
         auto lfIt = lengthFactor.find(candidate.speciesId);
@@ -1057,11 +1062,14 @@ struct QueryAssignments {
 // or below --group-max-idscore then inherits the result, which is the point of
 // grouping: a read whose own candidates are weak, or absent, is labelled by the
 // reads it overlaps with. Members above it keep their per-read reclassification.
+// Species removed by --min-reads are not candidates, and a query whose reads
+// --min-reads deleted stays unclassified.
 void assignQueries(
     const CandidateSet &cs,
     const std::vector<double> &theta,
     const std::vector<double> &lengthFactor,
-    double minTheta,
+    const std::vector<char> &dropped,
+    const std::vector<char> &queryDeleted,
     double cumulativeThreshold,
     TaxonomyWrapper *taxonomy,
     QueryAssignments &qa)
@@ -1073,7 +1081,7 @@ void assignQueries(
     qa.selected.assign(cs.obs.size(), 0);
 
 #ifdef OPENMP
-#pragma omp parallel shared(cs, theta, lengthFactor, minTheta, cumulativeThreshold, taxonomy, qa, queryCnt)
+#pragma omp parallel shared(cs, theta, lengthFactor, dropped, queryDeleted, cumulativeThreshold, taxonomy, qa, queryCnt)
 #endif
     {
         std::vector<std::pair<TaxID, double>> scores;
@@ -1084,14 +1092,14 @@ void assignQueries(
         for (size_t q = 0; q < queryCnt; ++q) {
             const uint32_t begin = cs.queryOffsets[q];
             const uint32_t end = cs.queryOffsets[q + 1];
-            if (begin == end) {
+            if (begin == end || queryDeleted[q]) {
                 continue;
             }
             scores.clear();
             double denom = 0.0;
             for (uint32_t j = begin; j < end; ++j) {
                 const uint32_t s = cs.obs[j].spIdx;
-                if (theta[s] < minTheta) {
+                if (dropped[s]) {
                     continue;
                 }
                 const double score = theta[s] * static_cast<double>(cs.obs[j].weight) * lengthFactor[s];
@@ -1136,13 +1144,7 @@ void fillGroupedRead(
     const QueryAssignments &qa,
     Query &query)
 {
-    query.name = entry.queryName;
-    query.queryLength = static_cast<int>(entry.queryLength);
-    query.queryLength2 = 0;
-    query.classification = 0;
-    query.idScore = 0.0f;
-    query.eValue = -1.0f;
-    query.taxCnt.clear();
+    unclassifiedRead(entry, query);
 
     const TaxID classification = qa.classification[q];
     if (classification == 0) {
@@ -1163,6 +1165,240 @@ void fillGroupedRead(
         for (const auto &taxCount : candidate.taxCnt) {
             query.taxCnt[taxCount.first] += static_cast<int>(taxCount.second);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --min-reads
+// ---------------------------------------------------------------------------
+//
+// As `mmseqs em-abundance --min-reads`: a species that is the top species (highest
+// posterior) of fewer than --min-reads reads is removed together with those reads,
+// which are left unclassified -- deleted, never re-assigned to their second-best
+// species. The surviving reads lose their posterior on removed species. Removing
+// reads changes the support of the species they also had, so the pass repeats until
+// every remaining species tops at least --min-reads reads. The EM is not rerun.
+//
+// A read's top species is taken from what its label is computed from: its EM query
+// (a read, a read group, or an ungrouped read), or, for a grouped read above
+// --group-max-idscore, its own candidates (an "own" unit). A group query counts the
+// members that take its label, those without candidates included, since they are
+// labelled with it too.
+
+constexpr uint32_t NO_INDEX = UINT32_MAX;
+
+struct SpeciesFilter {
+    std::vector<uint32_t> queryReads;    // EM query -> reads labelled from it
+    std::vector<Observation> ownObs;     // own units, CSR over ownOffsets
+    std::vector<uint32_t> ownOffsets;
+    std::vector<uint32_t> ownOfRead;     // candidate DB index -> own unit (NO_INDEX: none); grouped only
+
+    std::vector<char> dropped;           // species index -> removed
+    std::vector<int> droppedRound;       // species index -> round that removed it (0 = kept)
+    std::vector<uint64_t> topReads;      // species index -> reads it tops (when removed: at removal)
+    std::vector<char> queryDeleted;      // EM query -> the reads labelled from it are deleted
+    std::vector<char> ownDeleted;        // own unit -> the read is deleted
+    uint64_t deletedReads = 0;
+
+    size_t ownCount() const {
+        return ownOffsets.empty() ? 0 : ownOffsets.size() - 1;
+    }
+
+    bool readDeleted(size_t read, uint32_t query) const {
+        const uint32_t own = ownOfRead.empty() ? NO_INDEX : ownOfRead[read];
+        return own != NO_INDEX ? ownDeleted[own] != 0 : queryDeleted[query] != 0;
+    }
+};
+
+// Who each read's label comes from. Without groups every EM query is one read. With
+// groups the candidate DB is read once more for the members' own idScores, and the
+// members above --group-max-idscore get their own unit with the per-read weights.
+void prepareSpeciesFilter(
+    CandidateDBReader &reader,
+    size_t entryCount,
+    const LocalParameters &par,
+    const CandidateSet &cs,
+    const GroupedQueries *gq,
+    SpeciesFilter &filter)
+{
+    const size_t queryCnt = cs.queryCount();
+    filter.queryReads.assign(queryCnt, 0);
+    filter.ownOffsets.assign(1, 0);
+    if (gq == nullptr) {
+        for (size_t q = 0; q < queryCnt; ++q) {
+            filter.queryReads[q] = cs.queryOffsets[q + 1] > cs.queryOffsets[q] ? 1 : 0;
+        }
+        return;
+    }
+
+    const ScoreModel model(par);
+    filter.ownOfRead.assign(entryCount, NO_INDEX);
+    CandidateDBEntry entry;
+    for (size_t i = 0; i < entryCount; ++i) {
+        const uint32_t q = gq->readQuery[i];
+        if (q >= gq->groupCount) {
+            filter.queryReads[q] = cs.queryOffsets[q + 1] > cs.queryOffsets[q] ? 1 : 0;
+            continue;
+        }
+        if (!reader.getByIndex(i, entry, 0)) {
+            continue;
+        }
+        if (ownIdScore(entry) <= par.groupMaxIdScore) {
+            filter.queryReads[q] += 1;
+            continue;
+        }
+        double best = 0.0;
+        for (const SpeciesCandidate &candidate : entry.candidates) {
+            best = std::max(best, model.score(candidate.idScore, entry.queryLength));
+        }
+        for (const SpeciesCandidate &candidate : entry.candidates) {
+            Observation observation;
+            observation.spIdx = cs.sp2idx.at(candidate.speciesId);
+            observation.weight = static_cast<float>(
+                model.weight(model.score(candidate.idScore, entry.queryLength), best));
+            filter.ownObs.push_back(observation);
+        }
+        filter.ownOfRead[i] = static_cast<uint32_t>(filter.ownCount());
+        filter.ownOffsets.push_back(static_cast<uint32_t>(filter.ownObs.size()));
+    }
+}
+
+// The top species of obs[begin, end) among the surviving ones: highest
+// theta * weight * length factor, ties to the smaller taxon id as in resolvePosterior.
+uint32_t topSpecies(
+    const std::vector<Observation> &obs,
+    uint32_t begin,
+    uint32_t end,
+    const CandidateSet &cs,
+    const std::vector<double> &theta,
+    const std::vector<double> &lengthFactor,
+    const std::vector<char> &dropped)
+{
+    uint32_t top = NO_INDEX;
+    double topScore = 0.0;
+    for (uint32_t j = begin; j < end; ++j) {
+        const uint32_t s = obs[j].spIdx;
+        if (dropped[s]) {
+            continue;
+        }
+        const double score = theta[s] * static_cast<double>(obs[j].weight) * lengthFactor[s];
+        if (score <= 0.0) {
+            continue;
+        }
+        if (top == NO_INDEX || score > topScore
+            || (score == topScore && cs.speciesList[s] < cs.speciesList[top])) {
+            top = s;
+            topScore = score;
+        }
+    }
+    return top;
+}
+
+void filterSpecies(
+    const CandidateSet &cs,
+    const std::vector<double> &theta,
+    const std::vector<double> &lengthFactor,
+    int minReads,
+    SpeciesFilter &filter)
+{
+    const size_t speciesCnt = cs.speciesList.size();
+    const size_t queryCnt = cs.queryCount();
+    const size_t ownCnt = filter.ownCount();
+    filter.dropped.assign(speciesCnt, 0);
+    filter.droppedRound.assign(speciesCnt, 0);
+    filter.topReads.assign(speciesCnt, 0);
+    filter.queryDeleted.assign(queryCnt, 0);
+    filter.ownDeleted.assign(ownCnt, 0);
+    filter.deletedReads = 0;
+
+    std::vector<uint32_t> queryTop(queryCnt, NO_INDEX);
+    std::vector<uint32_t> ownTop(ownCnt, NO_INDEX);
+    std::vector<uint64_t> support(speciesCnt, 0);
+    std::vector<char> dropNow(speciesCnt, 0);
+    const uint64_t initialReads = [&filter]() {
+        uint64_t reads = 0;
+        for (const uint32_t r : filter.queryReads) {
+            reads += r;
+        }
+        return reads + filter.ownCount();
+    }();
+    size_t removedSpecies = 0;
+    int round = 0;
+    while (true) {
+#ifdef OPENMP
+#pragma omp parallel for schedule(dynamic, 1024)
+#endif
+        for (size_t q = 0; q < queryCnt; ++q) {
+            queryTop[q] = filter.queryDeleted[q] || filter.queryReads[q] == 0
+                              ? NO_INDEX
+                              : topSpecies(cs.obs, cs.queryOffsets[q], cs.queryOffsets[q + 1],
+                                           cs, theta, lengthFactor, filter.dropped);
+        }
+#ifdef OPENMP
+#pragma omp parallel for schedule(dynamic, 1024)
+#endif
+        for (size_t u = 0; u < ownCnt; ++u) {
+            ownTop[u] = filter.ownDeleted[u]
+                            ? NO_INDEX
+                            : topSpecies(filter.ownObs, filter.ownOffsets[u], filter.ownOffsets[u + 1],
+                                         cs, theta, lengthFactor, filter.dropped);
+        }
+
+        std::fill(support.begin(), support.end(), 0);
+        for (size_t q = 0; q < queryCnt; ++q) {
+            if (queryTop[q] != NO_INDEX) {
+                support[queryTop[q]] += filter.queryReads[q];
+            }
+        }
+        for (size_t u = 0; u < ownCnt; ++u) {
+            if (ownTop[u] != NO_INDEX) {
+                support[ownTop[u]] += 1;
+            }
+        }
+
+        size_t dropCnt = 0;
+        for (size_t s = 0; s < speciesCnt; ++s) {
+            dropNow[s] = 0;
+            if (filter.dropped[s]) {
+                continue;
+            }
+            filter.topReads[s] = support[s];
+            if (minReads > 0 && support[s] < static_cast<uint64_t>(minReads)) {
+                dropNow[s] = 1;
+                filter.dropped[s] = 1;
+                filter.droppedRound[s] = round + 1;
+                ++dropCnt;
+            }
+        }
+        if (dropCnt == 0) {
+            break;
+        }
+        ++round;
+        removedSpecies += dropCnt;
+
+        uint64_t deletedNow = 0;
+        for (size_t q = 0; q < queryCnt; ++q) {
+            if (queryTop[q] != NO_INDEX && dropNow[queryTop[q]]) {
+                filter.queryDeleted[q] = 1;
+                deletedNow += filter.queryReads[q];
+            }
+        }
+        for (size_t u = 0; u < ownCnt; ++u) {
+            if (ownTop[u] != NO_INDEX && dropNow[ownTop[u]]) {
+                filter.ownDeleted[u] = 1;
+                ++deletedNow;
+            }
+        }
+        filter.deletedReads += deletedNow;
+        std::cout << "  filter round " << round << ": removed " << dropCnt << " species topping < "
+                  << minReads << " reads and the " << deletedNow << " reads they topped" << std::endl;
+    }
+
+    std::cout << "Min. top-species reads: " << minReads << ": " << removedSpecies << "/" << speciesCnt
+              << " species removed in " << round << " round(s); " << filter.deletedReads << "/"
+              << initialReads << " reads deleted (left unclassified)" << std::endl;
+    if (removedSpecies == speciesCnt && speciesCnt > 0) {
+        std::cout << "Warning: --min-reads " << minReads << " removed every species." << std::endl;
     }
 }
 
@@ -1230,7 +1466,8 @@ void writeGroupTable(
 //   <out>_classifications.tsv  per-read reclassification, same columns as classify-candidates
 //   <out>_report.tsv           taxonomy report over those reclassified reads
 //   <out>_EM_report.tsv        taxonomy report over the raw EM abundances
-//   <out>_abundance.tsv        per-species EM abundance and length factor
+//   <out>_abundance.tsv        per-species EM abundance, length factor, and --min-reads support
+//                              (reads it tops; the filter round that removed it, 0 = kept)
 //   <out>_groups.tsv           (--read-groupings 1) per-group pooled scores and assignment
 
 // The groups live in <output directory>/grouping (groupMap, groups): em builds them there
@@ -1429,20 +1666,22 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     const std::vector<double> theta = runEm(cs, lengthFactorByIdx, par);
     printAbundanceDistribution(theta);
 
-    // --- Reclassification threshold: --min-reads expected reads ---
-    double minTheta = 0.0;
-    if (par.minReads > 0 && cs.totalMass > 0.0) {
-        minTheta = static_cast<double>(par.minReads) / cs.totalMass;
-        std::cout << "Min. expected reads   : " << par.minReads
-                  << " => theta >= " << minTheta << std::endl;
-    }
+    // --- --min-reads: remove species topping too few reads, and those reads ---
+    std::cout << "--------------------" << std::endl;
+    std::cout << "Filtering species (--min-reads " << par.minReads << ") ..." << std::endl;
+    SpeciesFilter filter;
+    prepareSpeciesFilter(reader, entryCount, par, cs, useGroups ? &gq : nullptr, filter);
+    filterSpecies(cs, theta, lengthFactorByIdx, par.minReads, filter);
 
-    // Species-keyed views for the per-read pass.
+    // Species-keyed views for the per-read pass: the surviving species only.
     std::unordered_map<TaxID, double> thetaBySp;
     std::unordered_map<TaxID, double> lengthFactorBySp;
     thetaBySp.reserve(cs.speciesList.size());
     lengthFactorBySp.reserve(cs.speciesList.size());
     for (size_t i = 0; i < cs.speciesList.size(); ++i) {
+        if (filter.dropped[i]) {
+            continue;
+        }
         thetaBySp[cs.speciesList[i]] = theta[i];
         lengthFactorBySp[cs.speciesList[i]] = lengthFactorByIdx[i];
     }
@@ -1466,7 +1705,8 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     if (useGroups) {
         std::cout << "--------------------" << std::endl;
         std::cout << "Classifying read groups ..." << std::endl;
-        assignQueries(cs, theta, lengthFactorByIdx, minTheta, par.lcaPosterior, taxonomy, qa);
+        assignQueries(cs, theta, lengthFactorByIdx, filter.dropped, filter.queryDeleted,
+                      par.lcaPosterior, taxonomy, qa);
         size_t classifiedGroups = 0;
         for (uint32_t g = 0; g < gq.groupCount; ++g) {
             classifiedGroups += (qa.classification[g] != 0);
@@ -1486,6 +1726,7 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     size_t unreadableCnt = 0;
     size_t groupLabelledCnt = 0;   // grouped reads that took their group's assignment
     size_t groupKeptOwnCnt = 0;    // grouped reads above --group-max-idscore, classified on their own
+    size_t deletedCnt = 0;         // reads whose top species --min-reads removed
 
     const ScoreModel scoreModel(par);
     std::vector<Query> chunk;
@@ -1495,8 +1736,8 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
 
 #ifdef OPENMP
 #pragma omp parallel shared(reader, chunk, chunkStart, chunkEnd, thetaBySp, lengthFactorBySp, \
-        minTheta, taxonomy, par, scoreModel, useGroups, cs, gq, qa) \
-        reduction(+:groupLabelledCnt, groupKeptOwnCnt)
+        taxonomy, par, scoreModel, useGroups, cs, gq, qa, filter) \
+        reduction(+:groupLabelledCnt, groupKeptOwnCnt, deletedCnt)
 #endif
         {
             int threadIdx = 0;
@@ -1525,10 +1766,13 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
                         ++groupKeptOwnCnt;
                     }
                 }
-                if (useGroups && (!inGroup || takeGroup)) {
+                if (filter.readDeleted(i, useGroups ? gq.readQuery[i] : static_cast<uint32_t>(i))) {
+                    unclassifiedRead(entry, chunk[i - chunkStart]);
+                    ++deletedCnt;
+                } else if (useGroups && (!inGroup || takeGroup)) {
                     fillGroupedRead(entry, gq.readQuery[i], cs, qa, chunk[i - chunkStart]);
                 } else {
-                    reclassifyRead(entry, thetaBySp, lengthFactorBySp, minTheta,
+                    reclassifyRead(entry, thetaBySp, lengthFactorBySp,
                                    par.lcaPosterior, scoreModel, taxonomy,
                                    chunk[i - chunkStart], scratchScores, scratchSpecies);
                 }
@@ -1554,6 +1798,8 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     }
     reporter.closeReadClassificationFile();
     std::cout << "Reads reclassified    : " << reclassifiedCnt << "/" << entryCount << std::endl;
+    std::cout << "Reads deleted         : " << deletedCnt << "/" << entryCount
+              << " (top species removed by --min-reads; written unclassified)" << std::endl;
     if (useGroups) {
         std::cout << "Grouped reads         : " << groupLabelledCnt << " took their group's assignment (idScore <= "
                   << par.groupMaxIdScore << "), " << groupKeptOwnCnt << " kept their own" << std::endl;
@@ -1607,12 +1853,14 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
         if (!abundanceFile.is_open()) {
             std::cerr << "Error: could not open " << abundanceFileName << " for writing." << std::endl;
         } else {
-            abundanceFile << "#speciesId\tabundance\testimated_reads\tlength_factor\n";
+            abundanceFile << "#speciesId\tabundance\testimated_reads\tlength_factor\ttop_reads\tremoved_round\n";
             for (const size_t i : order) {
                 abundanceFile << taxonomy->getOriginalTaxID(cs.speciesList[i]) << '\t'
                               << theta[i] << '\t'
                               << (theta[i] * cs.totalMass) << '\t'
-                              << lengthFactorByIdx[i] << '\n';
+                              << lengthFactorByIdx[i] << '\t'
+                              << filter.topReads[i] << '\t'
+                              << filter.droppedRound[i] << '\n';
             }
             abundanceFile.close();
         }
