@@ -473,17 +473,17 @@ LocalParameters::LocalParameters() :
                 typeid(double),
                 (void *) &lcaPosterior,
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
-        MIN_READS(MIN_READS_ID,
-                "--min-reads",
-                "em: min. reads a species must be the top species of; the others are removed with their reads",
-                "em: after EM, a species that is the top species (highest posterior) of fewer than this many reads is "
-                "removed together with those reads, which are left unclassified (deleted, not re-assigned to their "
-                "second-best species), as in mmseqs em-abundance. Repeated until every remaining species tops at least "
-                "this many reads. The EM abundances themselves (_EM_report.tsv) are unaffected. 0 keeps every species "
-                "and read. Default: 10",
-                typeid(int),
-                (void *) &minReads,
-                "^[0-9]+$"),
+        DROP(DROP_ID,
+                "--drop",
+                "em: remove the least-supported species summing to this percent of reads, with their reads",
+                "em: after EM, each read counts for its top species (highest posterior); the species are taken "
+                "least-supported first and removed while their reads sum to at most this percent of the reads "
+                "that have a top species, as OPAL --filter does on a profile. The reads they top are removed too, "
+                "left unclassified (deleted, not re-assigned to their second-best species). The EM abundances "
+                "themselves (_EM_report.tsv) are unaffected. 0 keeps every species and read. Default: 1",
+                typeid(double),
+                (void *) &dropPercent,
+                "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
         MAX_ITER(MAX_ITER_ID,
                 "--max-iter",
                 "em: max number of EM iterations",
@@ -1003,7 +1003,7 @@ LocalParameters::LocalParameters() :
     // em
     priorMass = 0.01;
     lcaPosterior = 0.7;
-    minReads = 10;
+    dropPercent = 1.0;
     maxIter = 1000;
     tol = 1e-6;
     emScoreMode = 1;
@@ -1269,7 +1269,7 @@ LocalParameters::LocalParameters() :
     emAlgorithm.push_back(&TOL);
     // reclassification
     emAlgorithm.push_back(&LCA_POSTERIOR);
-    emAlgorithm.push_back(&MIN_READS);
+    emAlgorithm.push_back(&DROP);
     // read grouping
     emAlgorithm.push_back(&READ_GROUPINGS);
     emAlgorithm.push_back(&GROUP_WEIGHT);

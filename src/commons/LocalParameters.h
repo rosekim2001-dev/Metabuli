@@ -139,7 +139,7 @@ public:
     PARAMETER(PRIOR_MASS)
     // Reclassification (posterior -> taxon) knobs.
     PARAMETER(LCA_POSTERIOR)
-    PARAMETER(MIN_READS)
+    PARAMETER(DROP)
     // Iteration control.
     PARAMETER(MAX_ITER)
     PARAMETER(TOL)
@@ -314,7 +314,7 @@ public:
     // em: EM abundance estimation + reclassification from a candidate DB
     double priorMass;      // phi: uniform pseudocount as a fraction of total read mass
     double lcaPosterior;   // reclassify: stop adding species once posterior mass reaches this
-    int minReads;          // reclassify: remove species topping fewer reads, and those reads
+    double dropPercent;    // reclassify: remove the least-supported species (percent of reads), and their reads
     int maxIter;           // hard iteration cap
     double tol;            // convergence tolerance on max|theta_new - theta_old|
     int emScoreMode;       // 0: idScore^p, 1: exp(lambda * (S - S_best)) with S = idScore * read length
