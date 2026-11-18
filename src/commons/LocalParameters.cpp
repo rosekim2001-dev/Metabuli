@@ -475,12 +475,13 @@ LocalParameters::LocalParameters() :
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
         DROP(DROP_ID,
                 "--drop",
-                "em: remove the least-supported species summing to this percent of reads, with their reads",
-                "em: after EM, each read counts for its top species (highest posterior); the species are taken "
-                "least-supported first and removed while their reads sum to at most this percent of the reads "
-                "that have a top species, as OPAL --filter does on a profile. The reads they top are removed too, "
-                "left unclassified (deleted, not re-assigned to their second-best species). The EM abundances "
-                "themselves (_EM_report.tsv) are unaffected. 0 keeps every species and read. Default: 1",
+                "em: remove the least abundant species summing to this percent of the EM abundance",
+                "em: after EM, the species are taken least abundant (EM abundance, theta) first and removed while "
+                "their abundances sum to at most this percent (1 = 1%, 0.1 = 0.1%), as OPAL --filter does on a profile. "
+                "A read whose top species (highest posterior) was removed takes, with --read-groupings 1, its group's "
+                "assignment if it is in a group and is left unclassified if it is a singleton; without groups it is "
+                "re-assigned to its remaining candidates, unclassified if none is left. The EM abundances themselves "
+                "(_EM_report.tsv) are unaffected. 0 keeps every species. Default: 0",
                 typeid(double),
                 (void *) &dropPercent,
                 "^[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$"),
@@ -1003,7 +1004,7 @@ LocalParameters::LocalParameters() :
     // em
     priorMass = 0.01;
     lcaPosterior = 0.7;
-    dropPercent = 1.0;
+    dropPercent = 0.0;
     maxIter = 1000;
     tol = 1e-6;
     emScoreMode = 1;

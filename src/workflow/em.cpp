@@ -1062,14 +1062,13 @@ struct QueryAssignments {
 // or below --group-max-idscore then inherits the result, which is the point of
 // grouping: a read whose own candidates are weak, or absent, is labelled by the
 // reads it overlaps with. Members above it keep their per-read reclassification.
-// Species removed by --drop are not candidates, and a query whose reads --drop
-// deleted stays unclassified.
+// Species removed by --drop are not candidates; a group is classified from the
+// species it has left.
 void assignQueries(
     const CandidateSet &cs,
     const std::vector<double> &theta,
     const std::vector<double> &lengthFactor,
     const std::vector<char> &dropped,
-    const std::vector<char> &queryDeleted,
     double cumulativeThreshold,
     TaxonomyWrapper *taxonomy,
     QueryAssignments &qa)
@@ -1081,7 +1080,7 @@ void assignQueries(
     qa.selected.assign(cs.obs.size(), 0);
 
 #ifdef OPENMP
-#pragma omp parallel shared(cs, theta, lengthFactor, dropped, queryDeleted, cumulativeThreshold, taxonomy, qa, queryCnt)
+#pragma omp parallel shared(cs, theta, lengthFactor, dropped, cumulativeThreshold, taxonomy, qa, queryCnt)
 #endif
     {
         std::vector<std::pair<TaxID, double>> scores;
@@ -1092,7 +1091,7 @@ void assignQueries(
         for (size_t q = 0; q < queryCnt; ++q) {
             const uint32_t begin = cs.queryOffsets[q];
             const uint32_t end = cs.queryOffsets[q + 1];
-            if (begin == end || queryDeleted[q]) {
+            if (begin == end) {
                 continue;
             }
             scores.clear();
@@ -1171,21 +1170,6 @@ void fillGroupedRead(
 // ---------------------------------------------------------------------------
 // --drop
 // ---------------------------------------------------------------------------
-//
-// As OPAL's --filter, but on reads and before the report: each read counts for its
-// top species (highest posterior), and the species are taken least-supported first
-// until their reads would sum to more than --drop percent of the reads that have a
-// top species. Those species are removed together with the reads they top, which are
-// left unclassified -- deleted, never re-assigned to their second-best species. The
-// surviving reads lose their posterior on removed species; their top species does not
-// change, so one pass is enough. Species that top no read are removed too. The EM is
-// not rerun.
-//
-// A read's top species is taken from what its label is computed from: its EM query
-// (a read, a read group, or an ungrouped read), or, for a grouped read above
-// --group-max-idscore, its own candidates (an "own" unit). A group query counts the
-// members that take its label, those without candidates included, since they are
-// labelled with it too.
 
 constexpr uint32_t NO_INDEX = UINT32_MAX;
 
@@ -1195,25 +1179,41 @@ struct SpeciesFilter {
     std::vector<uint32_t> ownOffsets;
     std::vector<uint32_t> ownOfRead;     // candidate DB index -> own unit (NO_INDEX: none); grouped only
 
+    bool grouped = false;                // --read-groupings 1
+    uint32_t groupCount = 0;             // queries below this are read groups
+
     std::vector<char> dropped;           // species index -> removed
     std::vector<uint64_t> topReads;      // species index -> reads it tops
-    std::vector<char> queryDeleted;      // EM query -> the reads labelled from it are deleted
-    std::vector<char> ownDeleted;        // own unit -> the read is deleted
-    uint64_t deletedReads = 0;
+    std::vector<char> queryTopDropped;   // EM query -> its top species was removed
+    std::vector<char> ownTopDropped;     // own unit -> its top species was removed
 
     size_t ownCount() const {
         return ownOffsets.empty() ? 0 : ownOffsets.size() - 1;
     }
 
-    bool readDeleted(size_t read, uint32_t query) const {
+    bool isSingleton(uint32_t query) const {
+        return grouped && query >= groupCount;
+    }
+
+    // The top species of the unit this read's label comes from was removed.
+    bool topDropped(size_t read, uint32_t query) const {
         const uint32_t own = ownOfRead.empty() ? NO_INDEX : ownOfRead[read];
-        return own != NO_INDEX ? ownDeleted[own] != 0 : queryDeleted[query] != 0;
+        return own != NO_INDEX ? ownTopDropped[own] != 0 : queryTopDropped[query] != 0;
+    }
+
+    // A singleton whose top species was removed: deleted, left unclassified.
+    bool readDeleted(size_t read, uint32_t query) const {
+        return isSingleton(query) && topDropped(read, query);
+    }
+
+    // A grouped read classified on its own whose top species was removed: labelled
+    // with its group's assignment instead.
+    bool readToGroup(size_t read) const {
+        const uint32_t own = ownOfRead.empty() ? NO_INDEX : ownOfRead[read];
+        return own != NO_INDEX && ownTopDropped[own] != 0;
     }
 };
 
-// Who each read's label comes from. Without groups every EM query is one read. With
-// groups the candidate DB is read once more for the members' own idScores, and the
-// members above --group-max-idscore get their own unit with the per-read weights.
 void prepareSpeciesFilter(
     CandidateDBReader &reader,
     size_t entryCount,
@@ -1225,6 +1225,8 @@ void prepareSpeciesFilter(
     const size_t queryCnt = cs.queryCount();
     filter.queryReads.assign(queryCnt, 0);
     filter.ownOffsets.assign(1, 0);
+    filter.grouped = gq != nullptr;
+    filter.groupCount = gq != nullptr ? gq->groupCount : 0;
     if (gq == nullptr) {
         for (size_t q = 0; q < queryCnt; ++q) {
             filter.queryReads[q] = cs.queryOffsets[q + 1] > cs.queryOffsets[q] ? 1 : 0;
@@ -1307,9 +1309,8 @@ void filterSpecies(
     const size_t ownCnt = filter.ownCount();
     filter.dropped.assign(speciesCnt, 0);
     filter.topReads.assign(speciesCnt, 0);
-    filter.queryDeleted.assign(queryCnt, 0);
-    filter.ownDeleted.assign(ownCnt, 0);
-    filter.deletedReads = 0;
+    filter.queryTopDropped.assign(queryCnt, 0);
+    filter.ownTopDropped.assign(ownCnt, 0);
 
     std::vector<uint32_t> queryTop(queryCnt, NO_INDEX);
     std::vector<uint32_t> ownTop(ownCnt, NO_INDEX);
@@ -1344,25 +1345,27 @@ void filterSpecies(
         }
     }
 
-    // Least-supported first, ties to the larger taxon id; a species is dropped while
-    // the running sum stays within the tail, as OPAL keeps a taxon once its sum passes.
+    // Least abundant first, ties to the larger taxon id; a species is dropped while the
+    // running sum of theta stays within the tail, as OPAL keeps a taxon once its sum passes.
     size_t removedSpecies = 0;
     if (dropPercent > 0.0) {
         std::vector<uint32_t> order(speciesCnt);
+        double total = 0.0;
         for (size_t s = 0; s < speciesCnt; ++s) {
             order[s] = static_cast<uint32_t>(s);
+            total += theta[s];
         }
         std::sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) {
-            if (filter.topReads[x] != filter.topReads[y]) {
-                return filter.topReads[x] < filter.topReads[y];
+            if (theta[x] != theta[y]) {
+                return theta[x] < theta[y];
             }
             return cs.speciesList[x] > cs.speciesList[y];
         });
-        const double tail = dropPercent / 100.0 * static_cast<double>(topped);
-        uint64_t sum = 0;
+        const double tail = dropPercent / 100.0 * total;
+        double sum = 0.0;
         for (const uint32_t s : order) {
-            sum += filter.topReads[s];
-            if (static_cast<double>(sum) > tail) {
+            sum += theta[s];
+            if (sum > tail) {
                 break;
             }
             filter.dropped[s] = 1;
@@ -1370,22 +1373,23 @@ void filterSpecies(
         }
     }
 
+    uint64_t affected = 0;
     for (size_t q = 0; q < queryCnt; ++q) {
         if (queryTop[q] != NO_INDEX && filter.dropped[queryTop[q]]) {
-            filter.queryDeleted[q] = 1;
-            filter.deletedReads += filter.queryReads[q];
+            filter.queryTopDropped[q] = 1;
+            affected += filter.queryReads[q];
         }
     }
     for (size_t u = 0; u < ownCnt; ++u) {
         if (ownTop[u] != NO_INDEX && filter.dropped[ownTop[u]]) {
-            filter.ownDeleted[u] = 1;
-            ++filter.deletedReads;
+            filter.ownTopDropped[u] = 1;
+            ++affected;
         }
     }
 
-    std::cout << "Dropped tail: " << dropPercent << "%: " << removedSpecies << "/" << speciesCnt
-              << " species removed; " << filter.deletedReads << "/" << topped
-              << " reads they topped deleted (left unclassified)" << std::endl;
+    std::cout << "Dropped abundance tail: " << dropPercent << "%: " << removedSpecies << "/"
+              << speciesCnt << " species removed, the top species of " << affected << "/" << topped
+              << " reads" << std::endl;
     if (removedSpecies == speciesCnt && speciesCnt > 0) {
         std::cout << "Warning: --drop " << dropPercent << " removed every species." << std::endl;
     }
@@ -1655,7 +1659,7 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     const std::vector<double> theta = runEm(cs, lengthFactorByIdx, par);
     printAbundanceDistribution(theta);
 
-    // --- --drop: remove the least-supported species, and the reads they top ---
+    // --- --drop: remove the least abundant species, and the reads they top ---
     std::cout << "--------------------" << std::endl;
     std::cout << "Filtering species (--drop " << par.dropPercent << "%) ..." << std::endl;
     SpeciesFilter filter;
@@ -1694,8 +1698,7 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     if (useGroups) {
         std::cout << "--------------------" << std::endl;
         std::cout << "Classifying read groups ..." << std::endl;
-        assignQueries(cs, theta, lengthFactorByIdx, filter.dropped, filter.queryDeleted,
-                      par.lcaPosterior, taxonomy, qa);
+        assignQueries(cs, theta, lengthFactorByIdx, filter.dropped, par.lcaPosterior, taxonomy, qa);
         size_t classifiedGroups = 0;
         for (uint32_t g = 0; g < gq.groupCount; ++g) {
             classifiedGroups += (qa.classification[g] != 0);
@@ -1715,7 +1718,11 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     size_t unreadableCnt = 0;
     size_t groupLabelledCnt = 0;   // grouped reads that took their group's assignment
     size_t groupKeptOwnCnt = 0;    // grouped reads above --group-max-idscore, classified on their own
-    size_t deletedCnt = 0;         // reads whose top species --drop removed
+    // Reads whose top species --drop removed, by what became of them.
+    size_t deletedCnt = 0;         // singletons (--read-groupings 1), left unclassified
+    size_t toGroupCnt = 0;         // grouped reads above --group-max-idscore, given their group's assignment
+    size_t relabelledCnt = 0;      // the others: classified from the species they have left
+    size_t lostCnt = 0;            // of the last two, those left with nothing (unclassified)
 
     const ScoreModel scoreModel(par);
     std::vector<Query> chunk;
@@ -1726,7 +1733,7 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
 #ifdef OPENMP
 #pragma omp parallel shared(reader, chunk, chunkStart, chunkEnd, thetaBySp, lengthFactorBySp, \
         taxonomy, par, scoreModel, useGroups, cs, gq, qa, filter) \
-        reduction(+:groupLabelledCnt, groupKeptOwnCnt, deletedCnt)
+        reduction(+:groupLabelledCnt, groupKeptOwnCnt, deletedCnt, toGroupCnt, relabelledCnt, lostCnt)
 #endif
         {
             int threadIdx = 0;
@@ -1755,15 +1762,26 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
                         ++groupKeptOwnCnt;
                     }
                 }
-                if (filter.readDeleted(i, useGroups ? gq.readQuery[i] : static_cast<uint32_t>(i))) {
-                    unclassifiedRead(entry, chunk[i - chunkStart]);
+                const uint32_t q = useGroups ? gq.readQuery[i] : static_cast<uint32_t>(i);
+                Query &query = chunk[i - chunkStart];
+                if (filter.readDeleted(i, q)) {
+                    unclassifiedRead(entry, query);
                     ++deletedCnt;
-                } else if (useGroups && (!inGroup || takeGroup)) {
-                    fillGroupedRead(entry, gq.readQuery[i], cs, qa, chunk[i - chunkStart]);
+                    continue;
+                }
+                const bool toGroup = filter.readToGroup(i);
+                if (useGroups && (!inGroup || takeGroup || toGroup)) {
+                    fillGroupedRead(entry, q, cs, qa, query);
                 } else {
                     reclassifyRead(entry, thetaBySp, lengthFactorBySp,
                                    par.lcaPosterior, scoreModel, taxonomy,
-                                   chunk[i - chunkStart], scratchScores, scratchSpecies);
+                                   query, scratchScores, scratchSpecies);
+                }
+                if (filter.topDropped(i, q)) {
+                    ++(toGroup ? toGroupCnt : relabelledCnt);
+                    if (query.classification == 0) {
+                        ++lostCnt;
+                    }
                 }
             }
         }
@@ -1787,8 +1805,17 @@ int emAlgorithm(int argc, const char **argv, const Command &command) {
     }
     reporter.closeReadClassificationFile();
     std::cout << "Reads reclassified    : " << reclassifiedCnt << "/" << entryCount << std::endl;
-    std::cout << "Reads deleted         : " << deletedCnt << "/" << entryCount
-              << " (top species removed by --drop; written unclassified)" << std::endl;
+    if (par.dropPercent > 0.0) {
+        std::cout << "Top species removed   : " << deletedCnt + toGroupCnt + relabelledCnt << " reads: ";
+        if (useGroups) {
+            std::cout << deletedCnt << " singletons deleted, " << toGroupCnt
+                      << " given their group's assignment, " << relabelledCnt
+                      << " took a group classified from its remaining species";
+        } else {
+            std::cout << relabelledCnt << " re-assigned to their remaining candidates";
+        }
+        std::cout << "; " << lostCnt << " of the kept ones had nothing left (unclassified)" << std::endl;
+    }
     if (useGroups) {
         std::cout << "Grouped reads         : " << groupLabelledCnt << " took their group's assignment (idScore <= "
                   << par.groupMaxIdScore << "), " << groupKeptOwnCnt << " kept their own" << std::endl;

@@ -313,8 +313,8 @@ public:
 
     // em: EM abundance estimation + reclassification from a candidate DB
     double priorMass;      // phi: uniform pseudocount as a fraction of total read mass
-    double lcaPosterior;   // reclassify: stop adding species once posterior mass reaches this
-    double dropPercent;    // reclassify: remove the least-supported species (percent of reads), and their reads
+    double lcaPosterior;   // reclassify-EM: stop adding species once posterior mass reaches this
+    double dropPercent;    // reclassify-EM: remove the least abundant species (percent of theta), and their reads
     int maxIter;           // hard iteration cap
     double tol;            // convergence tolerance on max|theta_new - theta_old|
     int emScoreMode;       // 0: idScore^p, 1: exp(lambda * (S - S_best)) with S = idScore * read length
